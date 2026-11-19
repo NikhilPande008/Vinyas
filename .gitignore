@@ -1,0 +1,23 @@
+/.DS_Store
+.DS_Store
+
+# Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+credentials.json
+*credentials*.json
+*sa-key*.json
+secrets/
+
+# Python / Build / Test Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
