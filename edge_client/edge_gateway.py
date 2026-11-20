@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpsSense AI — Standalone Edge Gateway (`edge_client/edge_gateway.py`).
+"""Vinyas — Standalone Edge Gateway (`edge_client/edge_gateway.py`).
 
 Demonstrates local `gemma4:e4b` multimodal (image + 48 kHz audio/vibration telemetry)
 pre-screening on an industrial edge box (via Ollama `/api/generate`).
@@ -15,11 +15,9 @@ Architectural Unit-Economics Principle:
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,7 +36,6 @@ def local_gemma4_prescreen(
     """Run local `gemma4:e4b` anomaly triage via Ollama, falling back to deterministic DSP thresholds."""
     t0 = time.perf_counter()
 
-    # Scenario 4 / nominal baseline short-circuit
     vib_rms = float(sensor_telemetry.get("vibration_rms_mms", 0.9))
     temp_c = float(sensor_telemetry.get("temperature_c", 40.0))
     if scenario_key == "LINE_D_HEALTHY" or (vib_rms < 1.4 and temp_c < 50.0):
@@ -50,12 +47,11 @@ def local_gemma4_prescreen(
             "escalation_reason": "Nominal ISO-10816 Zone A baseline. Cloud escalation suppressed.",
         }
 
-    # Attempt live local Ollama gemma4:e4b inference if daemon is running
     try:
         payload: dict[str, Any] = {
             "model": EDGE_MODEL,
             "prompt": (
-                f"Edge manufacturing anomaly triage for {scenario_key}. "
+                f"Vinyas edge manufacturing anomaly triage for {scenario_key}. "
                 f"Sensors: {json.dumps(sensor_telemetry)}. Respond JSON with pass_status ('HEALTHY'|'ESCALATE') "
                 "and anomaly_confidence."
             ),
@@ -100,7 +96,7 @@ def run_edge_cycle(scenario_key: str, cloud_url: str = CLOUD_RUN_API_URL) -> dic
     }
     sensors = sample_sensors.get(scenario_key, sample_sensors["LINE_A_PCB"])
     triage = local_gemma4_prescreen(scenario_key=scenario_key, sensor_telemetry=sensors)
-    print(f"[Edge Gate // {EDGE_MODEL}] Scenario={scenario_key} -> {triage['pass_status']} ({triage['edge_latency_ms']} ms)")
+    print(f"[Vinyas Edge Gate // {EDGE_MODEL}] Scenario={scenario_key} -> {triage['pass_status']} ({triage['edge_latency_ms']} ms)")
 
     if triage["pass_status"] == "HEALTHY":
         print("  -> Short-circuited locally at edge! Zero Cloud Run / Tier-2 tokens consumed.")
@@ -117,7 +113,7 @@ def run_edge_cycle(scenario_key: str, cloud_url: str = CLOUD_RUN_API_URL) -> dic
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="OpsSense AI Gemma 4 E4B Edge Gateway")
+    parser = argparse.ArgumentParser(description="Vinyas Gemma 4 E4B Edge Gateway")
     parser.add_argument(
         "--scenario",
         default="LINE_D_HEALTHY",

@@ -1,9 +1,9 @@
-# OpsSense AI // Autonomous Edge-to-Cloud Quality & Maintenance Twin for Discrete Manufacturing
+# Vinyas — Manufacturing Quality & Predictive Maintenance Platform
 
 **Startup Buildathon India — Pune City Buildathon Submission**
 
-- **Live Google Cloud Run Application (`*.run.app`):** [https://opssense-ai-65216244490.asia-south1.run.app](https://opssense-ai-65216244490.asia-south1.run.app) / [https://opssense-ai-7thtb7nbtq-el.a.run.app](https://opssense-ai-7thtb7nbtq-el.a.run.app) *(zero login walls, zero localhost dependencies)*
-- **Live Health & Telemetry Endpoint (`/health`):** [https://opssense-ai-65216244490.asia-south1.run.app/health](https://opssense-ai-65216244490.asia-south1.run.app/health)
+- **Live Google Cloud Run Application (`*.run.app`):** [https://vinyas-ai-65216244490.asia-south1.run.app](https://vinyas-ai-65216244490.asia-south1.run.app) *(zero login walls, zero localhost dependencies)*
+- **Live Health & Telemetry Endpoint (`/health`):** [https://vinyas-ai-65216244490.asia-south1.run.app/health](https://vinyas-ai-65216244490.asia-south1.run.app/health)
 - **Demo Video Link:** `[INSERT_3_MINUTE_DEMO_VIDEO_URL_HERE]`
 - **GCP Project & Region:** `vinyas-buildathon-6626` (`asia-south1` — Mumbai/Pune Low-Latency Zone)
 
@@ -17,7 +17,7 @@ Across Pune's **Chakan, Bhosari, Talegaon, and Pimpri-Chinchwad** automotive & i
 2. **Severe Unplanned Downtime Costs (₹42,000–₹1,20,000/hour):** Catastrophic spindle seizures or OEM customer SLA breaches halt downstream Tier-1 assembly lines.
 3. **Unviable Cloud Token Economics:** Streaming 24/7 12MP telecentric optical feeds and 48 kHz acoustic vibration streams directly to frontier cloud models costs **>₹3.5 Lakhs/month per line** and introduces unacceptable latency.
 
-**OpsSense AI** solves this with an **Autonomous 5-Tier Edge-to-Cloud Architecture** that pre-screens 100% of production cycles at the edge using **Gemma 4 E4B** (short-circuiting ~95.4% of healthy baseline parts at zero cloud token cost) and escalates only true anomalies to **Google Cloud Run**, **AlloyDB Express (PostgreSQL 18)** with **ScaNN Vector Search**, **In-Database SQL AI (`AI.EXTRACT()`, `AI.IF()`)**, **Progressive Disclosure Google Agent Skills (`.agents/skills/`)**, **Gemini 4 Hydrogen**, **Nano Banana 2.1**, and **Gemini 3.8 Live**.
+**Vinyas** solves this with an **Autonomous 5-Tier Edge-to-Cloud Architecture** that pre-screens 100% of production cycles at the edge using **Gemma 4 E4B** (short-circuiting ~95.4% of healthy baseline parts at zero cloud token cost) and escalates only true anomalies to **Google Cloud Run**, **AlloyDB Express (PostgreSQL 18)** with **ScaNN Vector Search**, **In-Database SQL AI (`AI.EXTRACT()`, `AI.IF()`)**, **Progressive Disclosure Google Agent Skills (`.agents/skills/`)**, **Gemini 4 Hydrogen**, **Nano Banana 2.1**, and **Gemini 3.8 Live**.
 
 ---
 
@@ -42,7 +42,7 @@ flowchart LR
     subgraph AlloyDB["Tier 5: AlloyDB Express (PostgreSQL 18) + Resilient Fallback"]
         SCANN["pgvector + alloydb_scann<br/>(equipment_sops 768-D Cosine Index)"]
         SQL_AI["google_ml_integration In-SQL AI<br/>(AI.EXTRACT() & AI.IF() on work_orders)"]
-        SQLITE["Zero-Crash Local SQLite Fallback<br/>(opssense_local.db)"]
+        SQLITE["Zero-Crash Local SQLite Fallback<br/>(vinyas_local.db)"]
     end
 
     EDGE_GW -- "HEALTHY (~95.4% Filtered - Scenario 4)" --> SHORT["Short-Circuit Exit<br/>(Zero Tier-2/3 Cloud Token Cost)"]
@@ -62,7 +62,7 @@ flowchart LR
 
 Every Google AI model and database capability in `backend/services/model_router.py` and `backend/db/alloydb_service.py` has a strict, non-redundant engineering role:
 
-| Pipeline Tier | Google Model / Engine | Why This Specific Model / Tool | Exact Use in OpsSense AI |
+| Pipeline Tier | Google Model / Engine | Why This Specific Model / Tool | Exact Use in Vinyas |
 | :--- | :--- | :--- | :--- |
 | **Tier 1: Edge Anomaly Gate** | **`Gemma 4 E4B`** (`/edge_client/edge_gateway.py`) / **`gemini-3.5-flash-lite`** (Cloud Sandbox Emulator) | Streaming 24/7 factory camera & 48 kHz acoustic feeds to heavy cloud models destroys unit economics and exposes plant IP. | Pre-screens every cycle in `<50 ms`. **Mandatory Short-Circuit Rule:** Scenario 4 (`LINE_D_HEALTHY`) returns `HEALTHY` and terminates cleanly at Tier-1, saving **~95.4% of Tier-2/3 cloud token spend**. |
 | **Tier 2: Multimodal Root-Cause & ScaNN RAG Engine** | **`gemini-4-hydrogen`** (Primary) / **`gemini-3.8-flash`** (Fallback) | Complex cross-modal defects require joint reasoning over optical defect frames, 4.21 kHz BPFO acoustic harmonics, AlloyDB ScaNN retrieved SOPs, and domain `SKILL.md` rules. | Executes **ONLY on `ESCALATE`**. Enforces strict Pydantic `Tier2DiagnosisResult` JSON schema returning defect classification, severity, root cause, matched SOP ID, ordered repair steps, and INR scrap saved. |
@@ -88,7 +88,7 @@ Compliant with the **`agentskills.io` specification** (YAML frontmatter `name` i
 
 ## 5. Mocked Hardware (Virtual Factory Line Simulator) vs. Production Edge Client
 
-To allow judges and automated evaluators to test all 4 manufacturing scenarios immediately in the browser with **zero physical hardware required**, OpsSense AI separates the **Cloud Run Virtual Factory Line Simulator** from the **Production Shop-Floor Edge Gateway**:
+To allow judges and automated evaluators to test all 4 manufacturing scenarios immediately in the browser with **zero physical hardware required**, Vinyas separates the **Cloud Run Virtual Factory Line Simulator** from the **Production Shop-Floor Edge Gateway**:
 
 1. **Virtual Factory Line Simulator (In-Browser Control Room Left Column):**
    - Pre-loads 4 Pune discrete manufacturing scenarios (`Line A: Automotive PCB`, `Line B: CNC Spindle` with playable 48 kHz WAV audio, `Line C: Chassis Weld Seam`, and `Line D: Calibration Check` healthy baseline).
@@ -102,7 +102,7 @@ To allow judges and automated evaluators to test all 4 manufacturing scenarios i
      python3 edge_client/edge_gateway.py --scenario LINE_D_HEALTHY
 
      # Escalates anomaly to Google Cloud Run /api/inspect:
-     python3 edge_client/edge_gateway.py --scenario LINE_B_CNC --cloud-url https://opssense-ai-65216244490.asia-south1.run.app
+     python3 edge_client/edge_gateway.py --scenario LINE_B_CNC --cloud-url https://vinyas-ai-65216244490.asia-south1.run.app
      ```
 
 ---
@@ -123,11 +123,12 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8080
 
 ### 6.3 Exact Google Cloud Run Deployment Command
 ```bash
-gcloud run deploy opssense-ai \
+gcloud run deploy vinyas-ai \
   --source=. \
   --project=vinyas-buildathon-6626 \
   --region=asia-south1 \
   --platform=managed \
+  --ingress=all \
   --allow-unauthenticated \
   --port=8080 \
   --cpu=2 \

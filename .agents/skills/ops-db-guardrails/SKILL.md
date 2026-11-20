@@ -1,9 +1,9 @@
 ---
 name: ops-db-guardrails
-description: Enforces database schema, naming, and SQL query safety guardrails for OpsSense AI AlloyDB Express (PostgreSQL 18) and SQLite fallback operations. Trigger this skill whenever validating DDL scripts, executing SQL queries, or writing work orders and incidents.
+description: Enforces database schema, naming, and SQL query safety guardrails for Vinyas AlloyDB Express (PostgreSQL 18) and SQLite fallback operations. Trigger this skill whenever validating DDL scripts, executing SQL queries, or writing work orders and incidents.
 ---
 
-# OpsSense AI Database Guardrails (`ops-db-guardrails`)
+# Vinyas Database Guardrails (`ops-db-guardrails`)
 
 ## Core Rules
 1. **Strict Naming Convention:** All table names and column identifiers MUST use `snake_case` (e.g., `equipment_sops`, `inspection_incidents`, `work_orders`).

@@ -1,5 +1,5 @@
 -- ============================================================================
--- OpsSense AI — AlloyDB Express (PostgreSQL 18) Initialization & Seed DDL
+-- Vinyas — AlloyDB Express (PostgreSQL 18) Initialization & Seed DDL
 -- Follows `.agents/skills/ops-db-guardrails/SKILL.md`:
 --   1. All table & column names strictly snake_case
 --   2. Mandatory primary key `id` on every table

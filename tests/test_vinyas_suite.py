@@ -1,6 +1,6 @@
-"""OpsSense AI — Automated Pytest Suite (`tests/test_opssense_suite.py`).
+"""Vinyas — Automated Pytest Suite (`tests/test_vinyas_suite.py`).
 
-Covers all mandatory Gate 1 verification requirements:
+Covers all mandatory verification requirements:
 1. `/health` readiness endpoint (Cloud Run + AlloyDB Express ScaNN + In-SQL AI + model justification matrix)
 2. Strict Pydantic schemas validation (`InspectionRequest`, `Tier1TriageResult`, `Tier2DiagnosisResult`, `WorkOrderCreate`, `WorkOrderRecord`)
 3. `skill_loader` Progressive Disclosure (`agentskills.io` spec: YAML frontmatter only at startup, full `SKILL.md` + `references/` loaded on domain activation)
@@ -11,19 +11,16 @@ Covers all mandatory Gate 1 verification requirements:
 
 from __future__ import annotations
 
-from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.config import PROJECT_ROOT
 from backend.main import app
 from backend.schemas import (
-    CopilotChatRequest,
     InspectionRequest,
     SensorTelemetry,
     Tier1TriageResult,
     Tier2DiagnosisResult,
-    WorkOrderCreate,
 )
 from backend.services.model_router import GoogleModelRouter
 from backend.services.simulator_assets import get_scenario_image_bytes
@@ -42,6 +39,7 @@ def test_health_endpoint_contract():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
+    assert data["service"] == "Vinyas — Manufacturing Quality & Predictive Maintenance Platform"
     assert data["cloud_run_ready"] is True
     assert data["storage_mode"] in ("ALLOYDB_EXPRESS_SCANN", "LOCAL_SQLITE_FALLBACK")
     assert data["db_ai_mode"] in ("ALLOYDB_IN_SQL", "PYTHON_FALLBACK")
@@ -76,7 +74,6 @@ def test_pydantic_schemas_strict_validation():
     assert t1.pass_status == "ESCALATE"
 
     with pytest.raises(Exception):
-        # Confidence > 1.0 must fail validation
         Tier1TriageResult(
             pass_status="HEALTHY",
             anomaly_confidence=1.5,
@@ -91,13 +88,11 @@ def test_skill_loader_progressive_disclosure():
     startup_status = loader.list_skills_status()
     assert len(startup_status) == 4
 
-    # Stage 1: No full markdown body or reference files should be loaded at startup
     for skill_meta in startup_status:
         assert skill_meta["full_body_loaded"] is False
         assert skill_meta["activation_count"] == 0
         assert skill_meta["references_loaded"] == []
 
-    # Stage 2: Activating Scenario 1 (`LINE_A_PCB`) loads `pcb-defect-triage` + `ipc_solder_standards.md`
     activated = loader.activate_skill_for_scenario("LINE_A_PCB")
     assert activated["name"] == "pcb-defect-triage"
     assert activated["full_body_loaded"] is True
@@ -105,7 +100,6 @@ def test_skill_loader_progressive_disclosure():
     assert "IPC-A-610 Class 3" in activated["skill_markdown"]
     assert "ipc_solder_standards.md" in activated["references"]
 
-    # Other skills remain unexpanded in memory
     after_status = {s["name"]: s for s in loader.list_skills_status()}
     assert after_status["pcb-defect-triage"]["full_body_loaded"] is True
     assert after_status["bearing-acoustic-diagnostics"]["full_body_loaded"] is False
@@ -118,19 +112,16 @@ def test_ops_db_guardrails_sql_validation():
     is_valid, violations = validate_sql_against_guardrails(ddl_text)
     assert is_valid is True, f"init_alloydb.sql failed guardrails: {violations}"
 
-    # 1. Destructive DROP TABLE must fail
     ok_drop, v_drop = validate_sql_against_guardrails("DROP TABLE equipment_sops;")
     assert ok_drop is False
     assert any("Destructive DDL" in msg for msg in v_drop)
 
-    # 2. CamelCase table name or missing primary key `id` must fail
     ok_camel, v_camel = validate_sql_against_guardrails(
         "CREATE TABLE EquipmentSops (sop_key TEXT NOT NULL);"
     )
     assert ok_camel is False
     assert len(v_camel) >= 2
 
-    # 3. Raw Python string interpolation `{user_input}` must fail
     ok_interp, v_interp = validate_sql_against_guardrails(
         "SELECT * FROM work_orders WHERE machine_id = '{machine_id}';"
     )

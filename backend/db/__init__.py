@@ -1,1 +1,1 @@
-"""OpsSense AI — Database Layer Package (`backend/db/__init__.py`)."""
+"""Vinyas — Database Layer Package (`backend/db/__init__.py`)."""

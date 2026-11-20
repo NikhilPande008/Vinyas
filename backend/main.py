@@ -1,4 +1,4 @@
-"""OpsSense AI — Single-Container FastAPI Backend (`backend/main.py`).
+"""Vinyas — Single-Container FastAPI Backend (`backend/main.py`).
 
 Serves on port 8080:
 - `GET /health` — Cloud Run + AlloyDB Express ScaNN + In-SQL AI + Google AI readiness
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import asynccontextmanager
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="OpsSense AI // Autonomous Edge-to-Cloud Quality & Maintenance Twin",
+    title="Vinyas — Manufacturing Quality & Predictive Maintenance Platform",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -116,7 +117,7 @@ async def health_check() -> dict[str, Any]:
     skills_status = skill_loader.list_skills_status()
     return {
         "status": "ok",
-        "service": "OpsSense AI // Autonomous Edge-to-Cloud Quality Twin",
+        "service": "Vinyas — Manufacturing Quality & Predictive Maintenance Platform",
         "cloud_run_ready": True,
         "gcp_project_id": settings.resolved_project_id,
         "region": settings.gcp_location,
@@ -175,7 +176,6 @@ async def run_edge_to_cloud_inspection(request: InspectionRequest) -> Inspection
         **scenario_meta["sensor_telemetry"]
     )
 
-    # Resolve raw frame bytes (either from custom webcam/upload override or simulator fixture)
     if request.custom_image_base64:
         b64_clean = request.custom_image_base64.split(",")[-1]
         try:
@@ -378,8 +378,6 @@ async def websocket_live_copilot(websocket: WebSocket):
         while True:
             raw_msg = await websocket.receive_text()
             try:
-                import json
-
                 payload = json.loads(raw_msg)
             except Exception:
                 payload = {"question": raw_msg, "scenario_key": "LINE_A_PCB"}
@@ -402,7 +400,6 @@ async def websocket_live_copilot(websocket: WebSocket):
         return
 
 
-# Serve built React frontend (/frontend/dist) if present for single-container Cloud Run deployment
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 if (FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend_assets")
@@ -424,7 +421,7 @@ async def serve_spa(full_path: str):
 
     return JSONResponse(
         {
-            "service": "OpsSense AI // Edge-to-Cloud Quality Twin API",
+            "service": "Vinyas — Manufacturing Quality & Predictive Maintenance Platform",
             "status": "online",
             "docs_url": "/docs",
             "health_url": "/health",

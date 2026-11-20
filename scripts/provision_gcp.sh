@@ -11,8 +11,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 REGION="${GCP_LOCATION:-asia-south1}"
-BILLING_ID="${BILLING_ID:-016344-D7A282-081BCC}"
-DISPLAY_NAME="OpsSense AI Buildathon India"
+BILLING_ID="${BILLING_ID:-}"
+DISPLAY_NAME="Vinyas Buildathon India"
 SA_NAME="vinyas-backend-sa"
 KEYRING_NAME="vinyas-qa-keyring"
 CRYPTOKEY_NAME="vinyas-cert-signer"
@@ -239,7 +239,7 @@ cat > "${ENV_FILE}" <<EOF
 # Team Vinyas (Nikhil Pande & Ravi Mule) — Startup Buildathon India 2026
 # Auto-provisioned via scripts/provision_gcp.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Google AI & Cloud Credentials (OpsSense AI + Vinyas Unified Config)
+# Google AI & Cloud Credentials (Vinyas Unified Config)
 GEMINI_API_KEY="${GEMINI_KEY_STRING}"
 GOOGLE_CLOUD_PROJECT="${PROJECT_ID}"
 GCP_PROJECT_ID="${PROJECT_ID}"

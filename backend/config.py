@@ -1,4 +1,4 @@
-"""OpsSense AI — Strict Pydantic Configuration Settings (`backend/config.py`).
+"""Vinyas — Strict Pydantic Configuration Settings (`backend/config.py`).
 
 Reads all configuration from environment variables or `.env` with zero hardcoded keys.
 """
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # Local SQLite fallback path for resilient zero-crash execution
     sqlite_fallback_path: str = Field(
-        default=str(PROJECT_ROOT / "opssense_local.db"),
+        default=str(PROJECT_ROOT / "vinyas_local.db"),
         validation_alias="SQLITE_FALLBACK_PATH",
     )
 
@@ -52,10 +52,10 @@ class Settings(BaseSettings):
     tier3_visual_sop_model: str = "gemini-nano-banana-2.1"
     tier4_live_copilot_model: str = "gemini-3.8-live"
 
-    # Runtime SDK compatible execution fallback aliases when preview model IDs redirect
-    sdk_flash_lite_alias: str = "gemini-2.5-flash-lite"
-    sdk_flash_alias: str = "gemini-2.5-flash"
-    sdk_image_alias: str = "gemini-2.5-flash-image-preview"
+    # Runtime SDK compatible fast live execution aliases when a preview tier returns 503/429
+    sdk_flash_lite_alias: str = "gemini-3.1-flash-lite"
+    sdk_flash_alias: str = "gemini-3.5-flash-lite"
+    sdk_image_alias: str = "gemini-3.1-flash-image"
 
     @property
     def resolved_project_id(self) -> str:

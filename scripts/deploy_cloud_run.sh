@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # scripts/deploy_cloud_run.sh
-# Builds & Deploys `opssense-ai` (Single-Container FastAPI + React Control Room)
+# Builds & Deploys `vinyas-ai` (Single-Container FastAPI + React Control Room)
 # to Google Cloud Run in `asia-south1` on port 8080 (`--allow-unauthenticated`).
 # ==============================================================================
 set -euo pipefail
@@ -17,7 +17,7 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
   set +a
 fi
 
-SERVICE_NAME="${SERVICE_NAME:-opssense-ai}"
+SERVICE_NAME="${SERVICE_NAME:-vinyas-ai}"
 REGION="${GCP_LOCATION:-asia-south1}"
 PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-${GCP_PROJECT_ID:-vinyas-buildathon-6626}}"
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
@@ -26,7 +26,7 @@ ALLOYDB_DSN="${ALLOYDB_DSN:-}"
 SA_EMAIL="${SA_EMAIL:-vinyas-backend-sa@${PROJECT_ID}.iam.gserviceaccount.com}"
 
 echo "=================================================================="
-echo " OpsSense AI — Google Cloud Run Single-Container Deployment"
+echo " Vinyas — Google Cloud Run Single-Container Deployment"
 echo "=================================================================="
 echo " Service Name   : ${SERVICE_NAME}"
 echo " GCP Project ID : ${PROJECT_ID}"
@@ -39,6 +39,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --platform=managed \
+  --ingress=all \
   --allow-unauthenticated \
   --service-account="${SA_EMAIL}" \
   --port=8080 \
@@ -48,6 +49,13 @@ gcloud run deploy "${SERVICE_NAME}" \
   --memory=2Gi \
   --timeout=300 \
   --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GCP_PROJECT_ID=${PROJECT_ID},GCP_LOCATION=${REGION},GEMINI_API_KEY=${GEMINI_API_KEY},GCS_BUCKET=${GCS_BUCKET},ALLOYDB_DSN=${ALLOYDB_DSN},DEMO_FALLBACK_ENABLED=true"
+
+gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --member="allUsers" \
+  --role="roles/run.invoker" \
+  --quiet >/dev/null 2>&1 || true
 
 CLOUD_RUN_URL="$(gcloud run services describe "${SERVICE_NAME}" \
   --project="${PROJECT_ID}" \

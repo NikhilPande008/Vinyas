@@ -1,4 +1,4 @@
-"""OpsSense AI — Progressive Disclosure Agent Skill Loader (`backend/services/skill_loader.py`).
+"""Vinyas — Progressive Disclosure Agent Skill Loader (`backend/services/skill_loader.py`).
 
 Implements the `agentskills.io` Progressive Disclosure pattern:
 1. At startup, scans `/.agents/skills/*/SKILL.md` and loads ONLY the YAML frontmatter
@@ -57,7 +57,6 @@ def _parse_frontmatter_only(skill_md_path: Path) -> tuple[str, str]:
     name = name_match.group(1).strip().strip("\"'")
     description = desc_match.group(1).strip().strip("\"'")
 
-    # Enforce agentskills.io constraints
     if not re.match(r"^[a-z0-9-]+$", name) or len(name) > 64:
         raise ValueError(f"Invalid skill name '{name}': must be lowercase-kebab-case <= 64 chars")
     if name != skill_md_path.parent.name:
@@ -147,24 +146,16 @@ class ProgressiveSkillLoader:
 
 
 def validate_sql_against_guardrails(sql_text: str) -> tuple[bool, list[str]]:
-    """Enforce `ops-db-guardrails` rules on DDL or query strings.
-
-    Rules verified:
-    1. No destructive `DROP TABLE`, `DROP DATABASE`, or `TRUNCATE TABLE`.
-    2. All `CREATE TABLE` definitions use `snake_case` table names and include an `id` primary key.
-    3. No raw Python format placeholders (`{var}`) inside SQL queries.
-    """
+    """Enforce `ops-db-guardrails` rules on DDL or query strings."""
     violations: list[str] = []
 
     if re.search(r"\b(DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE\s+TABLE)\b", sql_text, flags=re.IGNORECASE):
         violations.append("Destructive DDL (DROP TABLE / DROP DATABASE / TRUNCATE TABLE) is prohibited.")
 
-    # Check for unparameterized Python string interpolation braces outside PostgreSQL array/JSON literals
     cleaned_for_interp = re.sub(r"DO\s+\$\$.*?\$\$\s*;", "", sql_text, flags=re.DOTALL | re.IGNORECASE)
     if re.search(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", cleaned_for_interp):
         violations.append("Raw Python f-string interpolation detected; use parameterized $1 or ? bindings.")
 
-    # Verify CREATE TABLE statements use snake_case and define primary key `id`
     create_matches = re.finditer(
         r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)\s*\((.*?)\);",
         sql_text,

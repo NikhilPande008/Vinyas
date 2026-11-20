@@ -1,4 +1,4 @@
-"""OpsSense AI — Strict Pydantic v2 Data Contracts (`backend/schemas.py`)."""
+"""Vinyas — Strict Pydantic v2 Data Contracts (`backend/schemas.py`)."""
 
 from __future__ import annotations
 

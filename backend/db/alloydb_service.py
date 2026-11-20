@@ -1,11 +1,11 @@
-"""OpsSense AI — AlloyDB Express (PostgreSQL 18) Service (`backend/db/alloydb_service.py`).
+"""Vinyas — AlloyDB Express (PostgreSQL 18) Service (`backend/db/alloydb_service.py`).
 
 Provides:
 1. ScaNN Vector Retrieval (`ORDER BY embedding <=> $1 LIMIT 3`) on `equipment_sops`.
 2. In-Database SQL AI Enrichment (`ai.extract(...)` & `ai.if(...)`) on `work_orders`
    with clean `try/except` Python fallback (`ALLOYDB_IN_SQL` vs `PYTHON_FALLBACK`).
 3. Resilient Storage Fallback (`ALLOYDB_EXPRESS_SCANN` vs `LOCAL_SQLITE_FALLBACK`)
-   using local SQLite (`opssense_local.db`) so the application NEVER crashes.
+   using local SQLite (`vinyas_local.db`) so the application NEVER crashes.
 """
 
 from __future__ import annotations
@@ -224,7 +224,6 @@ class AlloyDBService:
                     ),
                 )
 
-            # Seed one realistic initial persisted work order so the UI ledger is non-empty on cold start
             cur.execute("SELECT COUNT(*) FROM work_orders")
             existing_count = cur.fetchone()[0]
             if existing_count == 0:
@@ -266,7 +265,7 @@ class AlloyDBService:
             return
 
         try:
-            self._pool = await asyncpg.create_pool(dsn=self.dsn, min_size=1, max_size=4, timeout=4.0)
+            self._pool = await asyncpg.create_pool(dsn=self.dsn, min_size=1, max_size=4, timeout=5.0)
             sql_file = Path(__file__).resolve().parent / "init_alloydb.sql"
             if sql_file.exists():
                 ddl = sql_file.read_text(encoding="utf-8")
@@ -328,7 +327,6 @@ class AlloyDBService:
             except Exception:
                 self.storage_mode = "LOCAL_SQLITE_FALLBACK"
 
-        # Local SQLite Cosine Vector Search Fallback
         conn = sqlite3.connect(self.sqlite_path)
         try:
             cur = conn.cursor()
@@ -447,7 +445,6 @@ class AlloyDBService:
         """Fallback structured extraction when PostgreSQL `google_ml_integration` is offline."""
         notes_lower = operator_notes.lower()
 
-        # Detect explicit part code in notes or map from scenario
         sku_match = re.search(r"\b([A-Z]{2,10}-[A-Z0-9]{2,10}(?:-[A-Z0-9]{2,8})?)\b", operator_notes)
         if sku_match:
             part_code = sku_match.group(1)
@@ -537,7 +534,6 @@ class AlloyDBService:
                         sla_critical = bool(row["sla_flag"])
                         db_ai_mode = "ALLOYDB_IN_SQL"
             except Exception:
-                # Graceful fallback when google_ml_integration preview flag is not enabled
                 tags = None
 
         if tags is None:
@@ -570,7 +566,6 @@ class AlloyDBService:
             except Exception:
                 self.storage_mode = "LOCAL_SQLITE_FALLBACK"
 
-        # Always persist into local SQLite mirror as well so local dev & container state stays synchronized
         conn = sqlite3.connect(self.sqlite_path)
         try:
             cur = conn.cursor()

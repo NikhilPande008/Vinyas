@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
-  AlertTriangle,
-  ArrowRight,
   Bot,
   Camera,
   CheckCircle2,
@@ -17,7 +15,6 @@ import {
   Play,
   RefreshCw,
   Send,
-  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Upload,
@@ -67,7 +64,7 @@ export default function App() {
   const [copilotMessages, setCopilotMessages] = useState([
     {
       role: 'assistant',
-      text: 'Gemini 3.8 Live Floor Co-Pilot ready. Select any shop-floor prompt chip or tap the voice mic to query AlloyDB ScaNN SOP tolerances and torque specs hands-free.',
+      text: 'Vinyas Gemini 3.8 Live Floor Co-Pilot ready. Select any shop-floor prompt chip or tap the voice mic to query AlloyDB ScaNN SOP tolerances and torque specs hands-free.',
       model: 'gemini-3.8-live',
       sopId: 'SOP-PUNE-PCB-01',
     },
@@ -138,7 +135,6 @@ export default function App() {
       } else {
         setActiveStage(4);
       }
-      // Refresh health to update loaded_skills_count & progressive disclosure state
       const hRes = await fetch('/health');
       if (hRes.ok) setHealth(await hRes.json());
     } catch (err) {
@@ -151,7 +147,6 @@ export default function App() {
     }
   };
 
-  // Run initial Scenario 1 inspection automatically on first load so judges immediately see an active control room
   useEffect(() => {
     if (scenarios.length > 0 && !inspectionResult && !inspecting) {
       handleRunInspection('LINE_A_PCB');
@@ -234,7 +229,6 @@ export default function App() {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      // Simulate shop-floor voice query if browser blocks Web Speech API
       handleAskCopilot(
         `Voice PTT [${selectedKey}]: What is the immediate containment action and torque spec for this fault?`
       );
@@ -310,10 +304,13 @@ export default function App() {
             <Cpu className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="font-bold text-sm md:text-base tracking-tight text-white">
-                OpsSense AI <span className="text-cyan-400 font-mono">//</span> Autonomous Edge-to-Cloud Quality Twin
+            <div className="flex items-center gap-2.5">
+              <h1 className="font-bold text-base md:text-lg tracking-tight text-white">
+                Vinyas
               </h1>
+              <span className="text-xs md:text-sm font-medium text-slate-300">
+                Manufacturing Quality & Predictive Maintenance Platform
+              </span>
               <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                 PUNE DISCRETE MFG
               </span>
@@ -713,7 +710,6 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* Grounding Metadata Badges */}
                 <div className="flex flex-wrap gap-1.5 text-[11px] font-mono">
                   <span className="px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
                     AlloyDB ScaNN SOP: {diag.matched_sop_id} (
@@ -732,7 +728,6 @@ export default function App() {
                   {diag.root_cause_analysis}
                 </p>
 
-                {/* Ordered Repair Checklist */}
                 <div className="space-y-1 pt-1">
                   <div className="text-[11px] font-mono uppercase text-cyan-400 font-semibold">
                     Prescribed Repair Checklist ({diag.matched_sop_id}):
@@ -877,7 +872,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Quick Shop-Floor Prompt Chips */}
             <div className="flex flex-wrap gap-1.5">
               {QUICK_COPILOT_CHIPS.map((chip, idx) => (
                 <button
@@ -890,7 +884,6 @@ export default function App() {
               ))}
             </div>
 
-            {/* Co-Pilot Message Transcript */}
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 h-48 overflow-y-auto space-y-2">
               {copilotMessages.map((m, idx) => (
                 <div
@@ -917,7 +910,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Manual Query Input */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -994,7 +986,6 @@ export default function App() {
                     {wo.operator_notes}
                   </p>
 
-                  {/* AI.EXTRACT() Structured Spare Part Tags */}
                   <div className="flex flex-wrap items-center gap-1 pt-0.5 text-[10px] font-mono">
                     <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
                       SKU: {wo.extracted_tags_json.part_code}
@@ -1029,7 +1020,7 @@ export default function App() {
               <div>
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <Layers className="w-5 h-5 text-cyan-400" />
-                  OpsSense AI — Multi-Model Google AI Stack, Progressive Skills & Stage Latencies
+                  Vinyas — Multi-Model Google AI Stack, Progressive Skills & Stage Latencies
                 </h2>
                 <p className="text-xs text-slate-400 font-mono">
                   Explicit Non-Overlapping Engineering Justification for Every Model & Database Component
@@ -1043,7 +1034,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* (A) Model-to-Role Table */}
             <div className="space-y-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-400 font-mono">
                 A. Google AI Model-to-Role Justification Matrix
@@ -1055,7 +1045,7 @@ export default function App() {
                       <th className="p-2.5 border-b border-slate-800">Pipeline Tier</th>
                       <th className="p-2.5 border-b border-slate-800">Google Model / Engine</th>
                       <th className="p-2.5 border-b border-slate-800">Why This Model</th>
-                      <th className="p-2.5 border-b border-slate-800">Exact Use in OpsSense AI</th>
+                      <th className="p-2.5 border-b border-slate-800">Exact Use in Vinyas</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
@@ -1076,7 +1066,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* (B) Loaded .agents/skills/ Progressive Disclosure Status */}
             <div className="space-y-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-purple-400 font-mono">
                 B. Authentic Google Agent Skills (/.agents/skills/) — Progressive Disclosure Status
@@ -1109,7 +1098,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* (C) Live Stage Latency Metrics */}
             <div className="space-y-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">
                 C. Live Stage Latency Telemetry

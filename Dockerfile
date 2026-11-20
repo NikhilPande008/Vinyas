@@ -1,5 +1,5 @@
 # ==============================================================================
-# Dockerfile — OpsSense AI (Single-Container Full-Stack Build for Google Cloud Run)
+# Dockerfile — Vinyas (Single-Container Full-Stack Build for Google Cloud Run)
 # Stage 1: Node 20 builds React/Vite/Tailwind UI into /frontend/dist
 # Stage 2: Python 3.11-slim serves FastAPI + /frontend/dist on port 8080
 # ==============================================================================

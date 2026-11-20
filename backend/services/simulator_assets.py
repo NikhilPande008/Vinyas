@@ -1,4 +1,4 @@
-"""OpsSense AI — Virtual Factory Line Simulator Fixtures (`backend/services/simulator_assets.py`).
+"""Vinyas — Virtual Factory Line Simulator Fixtures (`backend/services/simulator_assets.py`).
 
 Generates and serves the 4 realistic discrete manufacturing inspection scenarios:
 1. Line A: Automotive PCB (Solder Bridge Defect)
@@ -26,7 +26,7 @@ from backend.config import PROJECT_ROOT
 from backend.schemas import SensorTelemetry, Tier2DiagnosisResult
 
 
-ASSETS_DIR = PROJECT_ROOT / "data" / "opssense_assets"
+ASSETS_DIR = PROJECT_ROOT / "data" / "vinyas_assets"
 
 SCENARIO_DEFINITIONS: dict[str, dict[str, Any]] = {
     "LINE_A_PCB": {
@@ -127,39 +127,31 @@ def _generate_scenario_image(scenario_key: str, target_path: Path) -> None:
     draw = ImageDraw.Draw(img)
     _draw_grid(draw, width, height, 32)
 
-    # Top HUD bar
     draw.rectangle([0, 0, width, 36], fill=(17, 26, 39))
-    draw.text((14, 10), f"OPSSENSE AOI // {scenario_key} // 12MP TELECENTRIC RAW", fill=(148, 163, 184))
+    draw.text((14, 10), f"VINYAS AOI // {scenario_key} // 12MP TELECENTRIC RAW", fill=(148, 163, 184))
 
     if scenario_key == "LINE_A_PCB":
-        # Dark emerald solder mask PCB
         draw.rectangle([70, 65, 570, 365], fill=(14, 58, 47), outline=(34, 197, 94), width=2)
-        # Copper traces
         for idx in range(8):
             px = 185 + idx * 36
             draw.line([(px, 75), (px, 135)], fill=(212, 175, 55), width=4)
             draw.line([(px, 285), (px, 355)], fill=(212, 175, 55), width=4)
-            # Tin-lead solder pads
             draw.rectangle([px - 7, 120, px + 7, 148], fill=(203, 213, 225), outline=(148, 163, 184))
             draw.rectangle([px - 7, 272, px + 7, 300], fill=(203, 213, 225), outline=(148, 163, 184))
 
-        # QFP-64 IC package body
         draw.rectangle([160, 148, 480, 272], fill=(28, 33, 43), outline=(100, 116, 139), width=2)
         draw.ellipse([178, 164, 194, 180], fill=(71, 85, 105))
         draw.text((235, 198), "NXP-S32K-AUTOBMS-U4", fill=(226, 232, 240))
         draw.text((255, 218), "LOT: PUNE-26-A9", fill=(148, 163, 184))
 
-        # Bright molten solder bridge anomaly connecting Pins 14, 15, 16 (indices 2, 3, 4)
         draw.ellipse([246, 121, 342, 147], fill=(239, 68, 68), outline=(254, 202, 202), width=2)
         draw.rectangle([252, 126, 336, 142], fill=(226, 232, 240))
         draw.text((230, 88), "SOLDER BRIDGE SHORT (PINS 14-16)", fill=(248, 113, 113))
 
     elif scenario_key == "LINE_B_CNC":
-        # Metallic CNC spindle angular contact bearing raceway
         cx, cy = 320, 218
         draw.ellipse([cx - 145, cy - 145, cx + 145, cy + 145], fill=(45, 55, 72), outline=(148, 163, 184), width=3)
         draw.ellipse([cx - 108, cy - 108, cx + 108, cy + 108], fill=(23, 31, 44), outline=(100, 116, 139), width=2)
-        # Rolling ceramic balls
         for i in range(12):
             ang = i * (2 * math.pi / 12)
             bx = int(cx + 126 * math.cos(ang))
@@ -168,24 +160,19 @@ def _generate_scenario_image(scenario_key: str, target_path: Path) -> None:
         draw.ellipse([cx - 65, cy - 65, cx + 65, cy + 65], fill=(71, 85, 105), outline=(203, 213, 225), width=3)
         draw.ellipse([cx - 28, cy - 28, cx + 28, cy + 28], fill=(11, 17, 26))
 
-        # Outer-race fatigue spall crater at 2 o'clock
         draw.polygon([(412, 135), (446, 148), (438, 182), (404, 168)], fill=(239, 68, 68), outline=(254, 215, 170))
         draw.text((435, 112), "OUTER-RACE SPALL + 4.21kHz BPFO", fill=(251, 146, 60))
 
     elif scenario_key == "LINE_C_WELD":
-        # Chassis tubular steel members and horizontal MIG weld seam
         draw.rectangle([50, 80, 590, 205], fill=(51, 65, 85), outline=(100, 116, 139), width=2)
         draw.rectangle([50, 225, 590, 355], fill=(41, 53, 72), outline=(100, 116, 139), width=2)
-        # Weld bead ripple across center
         for x in range(70, 560, 14):
             draw.ellipse([x - 10, 198, x + 10, 232], fill=(148, 163, 184), outline=(71, 85, 105))
-        # Porosity wormhole cluster in middle of seam
         for px, py, r in [(290, 212, 7), (312, 217, 9), (334, 210, 8), (352, 218, 6), (322, 206, 5)]:
             draw.ellipse([px - r, py - r, px + r, py + r], fill=(15, 23, 42), outline=(239, 68, 68), width=2)
         draw.text((225, 162), "WORMHOLE POROSITY CLUSTER (GAS: 7.8 L/MIN)", fill=(248, 113, 113))
 
     else:
-        # LINE_D_HEALTHY precision machined flange
         cx, cy = 320, 218
         draw.rectangle([95, 72, 545, 360], fill=(16, 44, 38), outline=(16, 185, 129), width=2)
         draw.ellipse([cx - 115, cy - 115, cx + 115, cy + 115], fill=(51, 65, 85), outline=(52, 211, 153), width=3)
@@ -193,7 +180,7 @@ def _generate_scenario_image(scenario_key: str, target_path: Path) -> None:
         draw.text((178, 88), "NOMINAL GOLDEN PART // GD&T +/-0.005mm PASS", fill=(52, 211, 153))
 
     draw.rectangle([0, height - 30, width, height], fill=(17, 26, 39))
-    draw.text((14, height - 22), "CHAKAN PLANT-02 // SYNTHID TELEMETRY VERIFIED", fill=(100, 116, 139))
+    draw.text((14, height - 22), "VINYAS CHAKAN PLANT-02 // SYNTHID TELEMETRY VERIFIED", fill=(100, 116, 139))
     target_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(target_path, format="PNG")
 
@@ -212,7 +199,6 @@ def _generate_spindle_wav(target_path: Path) -> None:
         frames = bytearray()
         for n in range(total_samples):
             t = n / sample_rate
-            # 90 Hz shaft rotation + 706 Hz BPFO impulse modulation + 4210 Hz structural carrier
             envelope = 0.45 + 0.55 * abs(math.sin(2.0 * math.pi * 118.0 * t))
             carrier = math.sin(2.0 * math.pi * 4210.0 * t)
             base_hum = 0.25 * math.sin(2.0 * math.pi * 180.0 * t)
@@ -280,7 +266,6 @@ def render_pillow_visual_sop_overlay(
     base_img = Image.open(io.BytesIO(raw_image_bytes)).convert("RGB").resize((640, 420))
     draw = ImageDraw.Draw(base_img)
 
-    # Scenario-specific bounding box coordinates
     bbox_by_scenario = {
         "LINE_A_PCB": (236, 112, 352, 156, "FAULT: QFP PINS 14-16 BRIDGE"),
         "LINE_B_CNC": (392, 124, 458, 192, "FAULT: OUTER-RACE BPFO SPALL"),
@@ -292,22 +277,19 @@ def render_pillow_visual_sop_overlay(
         (220, 120, 420, 260, f"FAULT: {diagnosis.defect_class}"),
     )
 
-    # High-contrast target reticle & bounding box
     draw.rectangle([x1, y1, x2, y2], outline=(239, 68, 68), width=3)
     draw.rectangle([x1 - 4, y1 - 4, x2 + 4, y2 + 4], outline=(250, 204, 21), width=1)
     draw.line([(x2, y1), (x2 + 45, y1 - 28)], fill=(250, 204, 21), width=2)
     draw.rectangle([x2 + 10, y1 - 52, min(630, x2 + 265), y1 - 24], fill=(127, 29, 29), outline=(248, 113, 113), width=2)
     draw.text((x2 + 18, y1 - 44), box_label[:34], fill=(254, 242, 242))
 
-    # Top provenance banner
     draw.rectangle([0, 0, 640, 38], fill=(15, 23, 42))
     draw.text(
         (12, 11),
-        f"TIER-3 VISUAL REPAIR OVERLAY // {diagnosis.matched_sop_id} // {diagnosis.severity}",
+        f"VINYAS TIER-3 VISUAL REPAIR OVERLAY // {diagnosis.matched_sop_id} // {diagnosis.severity}",
         fill=(56, 189, 248),
     )
 
-    # Bottom Repair Action Callout Panel
     draw.rectangle([10, 292, 630, 412], fill=(9, 14, 23), outline=(56, 189, 248), width=2)
     draw.text(
         (22, 300),
