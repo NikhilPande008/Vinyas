@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from backend.config import PROJECT_ROOT, get_settings
 from backend.db.alloydb_service import AlloyDBService
+from backend.dsp.envelope import evaluate_t1a_signal_gate
 from backend.mock_rig.dataset import (
     LINE_DEFINITIONS,
     MANIFEST_PATH,
@@ -49,6 +50,7 @@ from backend.schemas import (
     WorkOrderCreate,
     WorkOrderRecord,
 )
+from backend.services.gate import combine_tier1_votes
 from backend.services.model_router import GoogleModelRouter
 from backend.services.rate_limiter import TokenBucketRateLimiter
 from backend.services.skill_loader import get_skill_loader
@@ -291,14 +293,37 @@ async def run_edge_to_cloud_inspection(
     line_meta = LINE_DEFINITIONS[line]
     scenario_key = f"LINE_{line}"
 
-    # STAGE 1: Tier-1 Gate
-    tier1_result = await model_router.run_tier1_edge_gate(
-        scenario_key=scenario_key,
-        sensor_telemetry=sensor_telemetry,
+    # STAGE 1A: Deterministic DSP & Process-Window Gate
+    t1a_result = evaluate_t1a_signal_gate(
+        line=line,
+        telemetry=sensor_telemetry,
+        wav_path=wav_path,
+    )
+
+    # STAGE 1B: Visual/Context Gate (Gemma 4 26B-A4B -> gemini-3.1-flash-lite)
+    t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
+        line=line,
+        line_meta=line_meta,
+        t1a_features=t1a_result.features,
+        t1a_flags=t1a_result.all_flags,
         raw_image_bytes=raw_image_bytes,
         input_simulated=input_simulated,
     )
+
+    # Combine T1-A and T1-B votes (fail-safe)
+    tier1_result = combine_tier1_votes(
+        t1a=t1a_result,
+        t1b_vote=t1b_vote,
+        t1b_confidence=t1b_conf,
+        t1b_observations=t1b_obs,
+        t1b_bbox_hint=t1b_bbox,
+        t1b_provenance=t1b_prov,
+        input_simulated=input_simulated,
+    )
+
     provenance_list: list[StageProvenance] = []
+    if tier1_result.provenance_t1a:
+        provenance_list.append(tier1_result.provenance_t1a)
     if tier1_result.provenance_t1b:
         provenance_list.append(tier1_result.provenance_t1b)
 
@@ -322,14 +347,15 @@ async def run_edge_to_cloud_inspection(
         )
         telemetry = TelemetryMetrics(
             tier1_ms=tier1_result.edge_latency_ms,
-            t1b_ms=tier1_result.edge_latency_ms,
+            t1a_ms=t1a_result.latency_ms,
+            t1b_ms=t1b_prov.latency_ms,
             retrieval_ms=0,
             tier2_ms=0,
             tier3_ms=0,
             total_ms=total_ms,
             storage_mode=alloydb_service.storage_mode,
             inference_mode=inf_mode,
-            tier1_model_used=tier1_result.provenance_t1b.model_id if tier1_result.provenance_t1b else None,
+            tier1_model_used=t1b_prov.model_id,
             tier2_model_used=None,
             tier3_model_used=None,
             total_input_tokens=in_tok,
@@ -345,6 +371,8 @@ async def run_edge_to_cloud_inspection(
             verdict_note=verdict_note,
             raw_image_url=raw_image_url,
             audio_url=audio_url,
+            envelope_spectrum_data_url=t1a_result.envelope_data_url,
+            dsp_features=t1a_result.features,
             sensor_telemetry=sensor_telemetry,
             tier1_triage=tier1_result,
             matched_sops=[],
@@ -404,14 +432,15 @@ async def run_edge_to_cloud_inspection(
 
     telemetry = TelemetryMetrics(
         tier1_ms=tier1_result.edge_latency_ms,
-        t1b_ms=tier1_result.edge_latency_ms,
+        t1a_ms=t1a_result.latency_ms,
+        t1b_ms=t1b_prov.latency_ms,
         retrieval_ms=retrieval_ms,
         tier2_ms=t2_prov.latency_ms,
         tier3_ms=0,
         total_ms=total_ms,
         storage_mode=alloydb_service.storage_mode,
         inference_mode=inf_mode,
-        tier1_model_used=tier1_result.provenance_t1b.model_id if tier1_result.provenance_t1b else None,
+        tier1_model_used=t1b_prov.model_id,
         tier2_model_used=t2_prov.model_id,
         tier3_model_used=None,
         total_input_tokens=in_tok,
@@ -428,6 +457,8 @@ async def run_edge_to_cloud_inspection(
         verdict_note=verdict_note,
         raw_image_url=raw_image_url,
         audio_url=audio_url,
+        envelope_spectrum_data_url=t1a_result.envelope_data_url,
+        dsp_features=t1a_result.features,
         sensor_telemetry=sensor_telemetry,
         tier1_triage=tier1_result,
         matched_sops=matched_sops,

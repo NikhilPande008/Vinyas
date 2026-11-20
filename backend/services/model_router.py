@@ -200,27 +200,63 @@ class GoogleModelRouter:
                 return resp, model_id, attempts
         return None, None, attempts
 
-    async def run_tier1_edge_gate(
+    async def run_tier1_visual_gate(
         self,
-        scenario_key: str,
-        sensor_telemetry: SensorTelemetry,
-        raw_image_bytes: Optional[bytes] = None,
+        line: str,
+        line_meta: dict[str, Any],
+        t1a_features: dict[str, Any],
+        t1a_flags: list[str],
+        raw_image_bytes: bytes,
         input_simulated: bool = True,
         force_fallback: bool = False,
-    ) -> Tier1TriageResult:
-        """Interim Phase-1 truthful Tier-1 gate (replaced by DSP + Gemma in Phase 3)."""
+    ) -> tuple[
+        Literal["NOMINAL", "ANOMALY", "UNAVAILABLE"],
+        float,
+        list[str],
+        Optional[list[int]],
+        StageProvenance,
+    ]:
+        """Tier-1B visual/context gate (`gemma-4-26b-a4b-it`, fallback `gemini-3.1-flash-lite`).
+
+        Never receives ground-truth labels or scenario verdicts. Fails safe on timeout/error.
+        """
         t0 = time.perf_counter()
         attempts: list[ModelAttempt] = []
+
         if not force_fallback and self._client is not None and genai_types is not None:
-            parts: list[Any] = []
-            if raw_image_bytes:
-                parts.append(genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png"))
-            parts.append(
-                "You are a manufacturing inspection gate. Inspect the frame and sensor telemetry below "
-                "and decide whether the part appears NOMINAL or ANOMALY.\n"
-                f"Telemetry: {sensor_telemetry.model_dump_json()}\n"
-                'Return JSON only: {"vote": "NOMINAL"|"ANOMALY", "confidence": 0.0-1.0, "reason": "short string"}.'
+            line_u = line.upper()
+            if line_u == "CNC":
+                domain_note = (
+                    "Line type: CNC machined part surface. Note: the spindle bearing is internal and "
+                    "not visible in this camera frame; judge only whether the machined surface looks "
+                    "visually abnormal, and note any signal flags provided."
+                )
+            elif line_u == "PCB":
+                domain_note = (
+                    "Line type: Automotive SMT PCB (4-sided QFP IC). Look carefully for conductive solder "
+                    "bridges spanning adjacent leads or starved/missing solder fillets on pads. "
+                    "Translucent glossy glare off the leads on the green solder mask is cosmetic flux residue, not a bridge."
+                )
+            else:
+                domain_note = (
+                    "Line type: Robotic MIG steel weld seam. Look carefully for dark clustered porosity "
+                    "pits/wormholes directly on the weld bead. Small droplets scattered on the plate "
+                    "beside an otherwise clean bead are cosmetic spatter, not seam porosity."
+                )
+
+            prompt = (
+                "You are a manufacturing quality visual gate. Inspect the image and numeric sensor features.\n"
+                f"Machine: {line_meta.get('machine_id')} ({line_meta.get('line_name')})\n"
+                f"{domain_note}\n"
+                f"T1-A Signal Features: {json.dumps(t1a_features)}\n"
+                f"T1-A Flags: {json.dumps(t1a_flags)}\n\n"
+                "Return strict JSON only with keys:\n"
+                '- "vote": "NOMINAL" or "ANOMALY"\n'
+                '- "confidence": float 0.0 to 1.0\n'
+                '- "observations": list of 1-3 short factual visual/feature observations\n'
+                '- "bbox_hint": optional [ymin, xmin, ymax, xmax] integers 0-1000 around a visible defect, or null'
             )
+            image_part = genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png")
             cfg = genai_types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
@@ -231,41 +267,53 @@ class GoogleModelRouter:
                     self.settings.tier1_visual_gate_model,
                     self.settings.tier1_fallback_model,
                 ],
-                contents=parts,
+                contents=[image_part, prompt],
                 config=cfg,
-                timeout_sec=4.0,
+                timeout_sec=5.0,
             )
             if resp and used_model and getattr(resp, "text", None):
                 try:
-                    parsed = json.loads(resp.text)
-                    vote = str(parsed.get("vote", "ANOMALY")).upper()
-                    pass_status: Literal["HEALTHY", "ESCALATE"] = (
-                        "HEALTHY" if vote == "NOMINAL" else "ESCALATE"
-                    )
+                    raw_txt = resp.text.strip()
+                    if raw_txt.startswith("```"):
+                        raw_txt = raw_txt.split("```")[1].lstrip("json").strip()
+                    parsed = json.loads(raw_txt)
+                    vote_raw = str(parsed.get("vote", "")).upper()
+                    if vote_raw not in ("NOMINAL", "ANOMALY"):
+                        raise ValueError(f"Invalid vote: {vote_raw}")
+                    conf = float(parsed.get("confidence", 0.7))
+                    obs = [str(o) for o in (parsed.get("observations") or [])][:4]
+                    bbox = parsed.get("bbox_hint")
+                    if isinstance(bbox, list) and len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
+                        bbox_clean: Optional[list[int]] = [max(0, min(1000, int(v))) for v in bbox]
+                    else:
+                        bbox_clean = None
                     elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                    is_primary = used_model == self.settings.tier1_visual_gate_model
+                    note = (
+                        "Gemma 4 (cloud-served stand-in for an on-device Gemma edge model)"
+                        if is_primary
+                        else f"Fallback visual gate ({used_model})"
+                    )
                     prov = StageProvenance(
                         stage="T1B_GATE",
-                        producer="MODEL" if used_model == self.settings.tier1_visual_gate_model else "FALLBACK_MODEL",
+                        producer="MODEL" if is_primary else "FALLBACK_MODEL",
                         model_id=used_model,
                         attempts=attempts,
                         latency_ms=elapsed_ms,
                         input_simulated=input_simulated,
+                        note=note,
                     )
-                    return Tier1TriageResult(
-                        pass_status=pass_status,
-                        anomaly_confidence=float(parsed.get("confidence", 0.5)),
-                        edge_latency_ms=elapsed_ms,
-                        escalation_reason=str(parsed.get("reason") or f"Visual gate vote: {vote}"),
-                        executed_model=used_model,
-                        short_circuited=(pass_status == "HEALTHY"),
-                        t1b_vote="NOMINAL" if vote == "NOMINAL" else "ANOMALY",
-                        provenance_t1b=prov,
+                    return (
+                        "NOMINAL" if vote_raw == "NOMINAL" else "ANOMALY",
+                        conf,
+                        obs,
+                        bbox_clean,
+                        prov,
                     )
                 except Exception:
                     if attempts:
                         attempts[-1].status = "SCHEMA_INVALID"
 
-        # Fail safe: gate unavailable -> ESCALATE
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         self.metrics.record_fallback_used("T1B_GATE")
         prov = StageProvenance(
@@ -277,16 +325,7 @@ class GoogleModelRouter:
             input_simulated=input_simulated,
             note="gate unavailable -> human review (fail safe)",
         )
-        return Tier1TriageResult(
-            pass_status="ESCALATE",
-            anomaly_confidence=1.0,
-            edge_latency_ms=elapsed_ms,
-            escalation_reason="Gate model unavailable -> escalated for human review (fail safe).",
-            executed_model="FALLBACK_RULES",
-            short_circuited=False,
-            t1b_vote="UNAVAILABLE",
-            provenance_t1b=prov,
-        )
+        return "UNAVAILABLE", 1.0, [], None, prov
 
     async def run_tier2_multimodal_diagnosis(
         self,
