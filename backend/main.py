@@ -52,6 +52,7 @@ from backend.schemas import (
     WorkOrderRecord,
 )
 from backend.services.gate import combine_tier1_votes
+from backend.services.metrics import compute_gate_token_accounting
 from backend.services.model_router import GoogleModelRouter
 from backend.services.overlay import render_model_bbox_overlay
 from backend.services.rate_limiter import TokenBucketRateLimiter
@@ -189,7 +190,9 @@ async def reveal_ground_truth(
     if not _SAMPLE_ID_RE.match(sample_id):
         raise HTTPException(status_code=404, detail="Sample not found")
     settings = get_settings()
-    eval_authorized = (eval_mode == 1) and (x_eval_token == settings.eval_token)
+    eval_authorized = (
+        settings.eval_reveal_enabled and (eval_mode == 1) and (x_eval_token == settings.eval_token)
+    )
     if sample_id not in _inspected_samples and not eval_authorized:
         raise HTTPException(
             status_code=403,
@@ -594,13 +597,11 @@ async def run_batch_line_run(
             }
         )
 
-    gated_tokens = t1b_tokens_total + sum(t2_tokens_list)
-    mean_t2 = int(sum(t2_tokens_list) / len(t2_tokens_list)) if t2_tokens_list else 0
-    cloud_only_tokens = n * mean_t2
-    saving_pct = (
-        round(100.0 * (1.0 - gated_tokens / cloud_only_tokens), 1)
-        if cloud_only_tokens > 0
-        else None
+    token_acc = compute_gate_token_accounting(
+        n_parts=n,
+        t1_tokens_total=t1b_tokens_total,
+        n_escalated=escalated_count,
+        t2_success_tokens=[t for t in t2_tokens_list if t > 0],
     )
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -609,10 +610,14 @@ async def run_batch_line_run(
         "parts_inspected": n,
         "escalated_count": escalated_count,
         "escalation_rate_pct": round(100.0 * escalated_count / n, 1),
-        "gated_tokens": gated_tokens,
-        "cloud_only_estimated_tokens": cloud_only_tokens,
-        "measured_token_saving_pct": saving_pct,
-        "note": "Measured from API usage_metadata on simulated mock-rig draws; real plant savings depend on the plant's defect rate.",
+        "gated_tokens": token_acc["gated_tokens"],
+        "cloud_only_estimated_tokens": token_acc["cloud_only_tokens"],
+        "measured_token_saving_pct": token_acc["saving_pct"],
+        "t1_tokens_total": token_acc["t1_tokens_total"],
+        "mean_t2_tokens": token_acc["mean_t2_tokens"],
+        "t2_calls_failed": token_acc["t2_calls_failed"],
+        "token_method": token_acc["method"],
+        "note": "Measured from API usage_metadata on simulated mock-rig draws; failed Tier-2 calls are charged the mean measured cost, so outages never count as savings. Real plant savings depend on the plant's defect rate.",
         "elapsed_ms": elapsed_ms,
         "parts": parts_log,
     }

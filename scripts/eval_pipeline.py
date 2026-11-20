@@ -23,6 +23,7 @@ import httpx
 
 from backend.config import PROJECT_ROOT, get_settings
 from backend.mock_rig.dataset import MANIFEST_PATH, ensure_dataset
+from backend.services.metrics import compute_gate_token_accounting
 
 
 HEADER_VERBATIM = (
@@ -181,11 +182,24 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
     tot_lats = [r["total_ms"] for r in valid]
 
     # Token accounting
-    gated_tokens = sum(r["t1_tokens"] + r["t2_tokens"] for r in valid)
-    t2_toks = [r["t2_tokens"] for r in valid if r["t2_tokens"] > 0]
-    mean_t2_tok = int(statistics.mean(t2_toks)) if t2_toks else 0
-    cloud_only_tokens = len(valid) * mean_t2_tok
-    saving_pct = round(100.0 * (1.0 - gated_tokens / cloud_only_tokens), 1) if cloud_only_tokens > 0 else None
+    token_acc = compute_gate_token_accounting(
+        n_parts=len(valid),
+        t1_tokens_total=sum(r["t1_tokens"] for r in valid),
+        n_escalated=sum(1 for r in valid if r["verdict"] == "ESCALATE"),
+        t2_success_tokens=[r["t2_tokens"] for r in valid if r["t2_tokens"] > 0],
+    )
+
+    # Who actually answered each model stage (not just whether the stage produced output)
+    t1b_answered: dict[str, int] = {}
+    for r in valid:
+        key = r.get("t1b_model") or "FALLBACK_RULES (gate unavailable)"
+        t1b_answered[key] = t1b_answered.get(key, 0) + 1
+    t2_by_model = [r for r in t2_eval if r.get("t2_model")]
+    t2_by_rules = [r for r in t2_eval if not r.get("t2_model")]
+    t2_agree_model = sum(1 for r in t2_by_model if r["t2_agreed"])
+    t2_agree_rules = sum(1 for r in t2_by_rules if r["t2_agreed"])
+    neg_by_model = [r for r in valid if not r["gt_is_defect"] and r.get("t2_model")]
+    neg_model_clear = sum(1 for r in neg_by_model if r["t2_defect_type"] == "NO_DEFECT_FOUND")
 
     fallback_counts: dict[str, int] = {}
     for r in valid:
@@ -209,6 +223,10 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
         "false_escalation_hard_negative_pct": fer_hn,
         "false_negatives": fn_list,
         "tier2_agreement": f"{t2_agree}/{len(t2_eval)} ({t2_agree_pct}%)",
+        "tier2_agreement_by_model": f"{t2_agree_model}/{len(t2_by_model)}",
+        "tier2_agreement_by_rules": f"{t2_agree_rules}/{len(t2_by_rules)}",
+        "tier2_model_on_non_defects_no_defect_found": f"{neg_model_clear}/{len(neg_by_model)}",
+        "t1b_answered_by": t1b_answered,
         "latencies_ms": {
             "t1a_p50": _pct(t1a_lats, 0.50),
             "t1a_p95": _pct(t1a_lats, 0.95),
@@ -223,13 +241,7 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
             "total_p50": _pct(tot_lats, 0.50),
             "total_p95": _pct(tot_lats, 0.95),
         },
-        "token_accounting": {
-            "batch_defect_rate_pct": batch_defect_rate,
-            "gated_tokens": gated_tokens,
-            "mean_t2_tokens": mean_t2_tok,
-            "cloud_only_tokens": cloud_only_tokens,
-            "saving_pct": saving_pct,
-        },
+        "token_accounting": {"batch_defect_rate_pct": batch_defect_rate, **token_acc},
         "sop_guard_unverified_values_total": unverified_total,
         "fallback_counts": fallback_counts,
         "records": records,
@@ -260,7 +272,9 @@ def write_markdown(summary: dict[str, Any], out_path: Path) -> None:
         f"- **False-escalation rate (nominal):** `{summary['false_escalation_nominal_pct']}%`",
         f"- **False-escalation rate (hard negatives):** `{summary['false_escalation_hard_negative_pct']}%`",
         f"- **False negatives:** `{summary['false_negatives']}`",
-        f"- **Tier-2 defect-type agreement (on escalated true defects):** `{summary['tier2_agreement']}`",
+        f"- **Tier-2 defect-type agreement (on escalated true defects):** `{summary['tier2_agreement']}` — answered by a Gemini model: `{summary['tier2_agreement_by_model']}`, by rule-based fallback: `{summary['tier2_agreement_by_rules']}`",
+        f"- **Tier-2 model on nominal / hard-negative parts (returned NO_DEFECT_FOUND):** `{summary['tier2_model_on_non_defects_no_defect_found']}`",
+        f"- **T1-B visual gate answered by:** `{json.dumps(summary['t1b_answered_by'])}`",
         f"- **SOP-guard unverified numeric values:** `{summary['sop_guard_unverified_values_total']}`",
         "",
         "## Per-Tier Measured Latencies (ms)",
@@ -277,9 +291,11 @@ def write_markdown(summary: dict[str, Any], out_path: Path) -> None:
         "## Measured Token Accounting",
         "",
         f"- **Batch size (`N`):** `{summary['n_completed']}` (simulated batch defect rate: `{tok['batch_defect_rate_pct']}%`)",
-        f"- **Gated total tokens (T1-B all + T2 escalated):** `{tok['gated_tokens']:,}`",
-        f"- **Estimated cloud-only tokens (`N × mean T2` = `{summary['n_completed']} × {tok['mean_t2_tokens']}`):** `{tok['cloud_only_tokens']:,}`",
-        f"- **Measured token saving at this batch defect rate:** `{tok['saving_pct']}%` (real plant savings depend on the plant's actual defect rate)",
+        f"- **Escalated parts:** `{tok['n_escalated']}/{tok['n_parts']}` (Tier-2 calls succeeded: `{tok['t2_calls_succeeded']}`, failed: `{tok['t2_calls_failed']}`)",
+        f"- **Measured T1 tokens (all parts):** `{tok['t1_tokens_total']:,}`; **mean measured T2 tokens per successful call:** `{tok['mean_t2_tokens']:,}`",
+        f"- **Gated tokens (`T1 + escalations × mean T2`):** `{tok['gated_tokens']:,}`",
+        f"- **Cloud-only tokens (`N × mean T2`):** `{tok['cloud_only_tokens']:,}`",
+        f"- **Token effect of the gate in this run:** `{tok['saving_pct']}%` (negative means the gate cost more than it saved, which happens when it escalates most parts; failed Tier-2 calls are charged at the mean cost so outages never count as savings)",
         "",
         "## Fallbacks Recorded",
         f"```json\n{json.dumps(summary['fallback_counts'], indent=2)}\n```",

@@ -31,6 +31,12 @@ Ground-truth labels live **exclusively** in `data/mock_rig/manifest.json`. The i
 - `IMBALANCE`: elevated `1×` shaft harmonic (`~90 Hz`) pushing RMS velocity into ISO 20816-3 Zone C without BPFO periodicity.
 - `vibration_rms_mms` is computed directly from the `10–1,000 Hz` Butterworth-bandpassed signal.
 
+### DSP Gate Calibration (`backend/dsp/envelope.py`)
+- Escalating rule: `BEARING_PERIODIC_IMPACT` when the envelope peak within `±3%` of the computed BPFO has SNR `≥ 14 dB` **and** the `2× BPFO` peak has SNR `≥ 11 dB`, both against the median envelope spectrum in `50–2,000 Hz`.
+- Why not a lower threshold: on the 13 nominal and wrench-strike CNC samples, noise alone produces a BPFO-band peak of `5.4–10.5 dB`, so a `6 dB` rule would escalate healthy spindles. The 7 fault samples sit at `38–42 dB`.
+- `TRANSIENT_IMPACT` (kurtosis `≥ 8` without a BPFO flag) is informational only; wrench strikes measure kurtosis `~300` and are not escalated by the DSP gate.
+- Reproduce: `python scripts/calibrate_dsp_gate.py` (writes `eval/dsp_gate_calibration.md`). These margins are wide because the synthetic fault is strong; real spindle data will separate less cleanly.
+
 ### Process Telemetry (`backend/mock_rig/process.py`)
 - **PCB (SAC305 reflow):** nominal window `1.0–3.0 °C/s` preheat ramp, `235–250 °C` peak, `45–90 s` Time Above Liquidus (TAL). Roughly `30%` of defective PCB samples keep nominal reflow telemetry so optical inspection remains necessary.
 - **MIG Weld (82% Ar / 18% CO2):** nominal shielding gas `15–20 L/min`, arc voltage `20–24 V`, wire feed `7.5–9.5 m/min`. `POROSITY_GAS_LOSS` drops gas flow to `5.2–10.8 L/min`; `SPATTER_COSMETIC` maintains nominal gas flow.

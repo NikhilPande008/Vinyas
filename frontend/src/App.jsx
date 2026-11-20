@@ -446,6 +446,7 @@ export default function App() {
   };
 
   const diag = inspection?.tier2_diagnosis || null;
+  const lossNotEstimated = Boolean(diag?.economics_basis?.startsWith('Not estimated'));
   const t1 = inspection?.tier1_triage || null;
   const tel = inspection?.telemetry || null;
 
@@ -1025,13 +1026,19 @@ export default function App() {
                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
                       <div>
                         <div className="text-xs text-slate-400">{t.avoidableLossLabel}</div>
-                        <div className="text-xs text-slate-500">
-                          {diag.estimated_downtime_prevented_mins} min est. downtime avoided
+                        {!lossNotEstimated && (
+                          <div className="text-xs text-slate-500">
+                            {diag.estimated_downtime_prevented_mins} min est. downtime avoided
+                          </div>
+                        )}
+                      </div>
+                      {lossNotEstimated ? (
+                        <div className="text-sm font-semibold text-slate-300">{t.lossNotEstimated}</div>
+                      ) : (
+                        <div className="text-lg font-extrabold font-mono text-emerald-300">
+                          ₹{Number(diag.estimated_avoidable_loss_inr || 0).toLocaleString('en-IN')}
                         </div>
-                      </div>
-                      <div className="text-lg font-extrabold font-mono text-emerald-300">
-                        ₹{Number(diag.estimated_avoidable_loss_inr || 0).toLocaleString('en-IN')}
-                      </div>
+                      )}
                     </div>
                   </section>
 
@@ -1238,10 +1245,14 @@ export default function App() {
                       </div>
                     </div>
                     <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                      <div className="text-slate-400">Measured Token Saving</div>
-                      <div className="font-mono font-bold text-emerald-300">
+                      <div className="text-slate-400">Token effect of the gate</div>
+                      <div
+                        className={`font-mono font-bold ${
+                          lineRunResult.measured_token_saving_pct !== null && lineRunResult.measured_token_saving_pct < 0 ? 'text-amber-300' : 'text-emerald-300'
+                        }`}
+                      >
                         {lineRunResult.measured_token_saving_pct !== null
-                          ? `${lineRunResult.measured_token_saving_pct}%`
+                          ? `${lineRunResult.measured_token_saving_pct > 0 ? '−' : '+'}${Math.abs(lineRunResult.measured_token_saving_pct)}% tokens`
                           : '—'}
                       </div>
                     </div>

@@ -30,11 +30,13 @@ from backend.mock_rig.dataset import MANIFEST_PATH, SAMPLES_DIR, ensure_dataset
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python3 scripts/verify_live.py <BASE_URL>")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    check_rate_limit = "--check-rate-limit" in sys.argv
+    if not args:
+        print("Usage: python3 scripts/verify_live.py <BASE_URL> [--check-rate-limit]")
         sys.exit(1)
 
-    base = sys.argv[1].rstrip("/")
+    base = args[0].rstrip("/")
     ensure_dataset()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     results: list[str] = [
@@ -94,19 +96,39 @@ def main() -> None:
         results.append(f"- **Observed verdicts:** `{sorted(verdicts)}` | p50=`{p50} ms` | p95=`{p95} ms`")
         results.append("")
 
-        # 4. Upload test (1 healthy + 1 defect on PCB)
-        results.append("## 4. Custom Upload Test (PCB)")
-        nom_pcb = next(x for x in manifest if x["line"] == "PCB" and x["defect_type"] == "NOMINAL")
-        def_pcb = next(x for x in manifest if x["line"] == "PCB" and x["defect_type"] == "SOLDER_BRIDGE")
-        for label, entry in (("Healthy upload", nom_pcb), ("Defect upload", def_pcb)):
+        # 4. Upload test: one healthy and one defect image per line (uploads use nominal telemetry
+        #    unless the operator picks a preset, so PCB/WELD verdicts come from the visual gate).
+        #    CNC frames never show the bearing, so the CNC "defect" upload carries Zone-C vibration
+        #    telemetry, which is how a CNC fault must be detected.
+        results.append("## 4. Custom Upload Test (healthy vs defect, every line)")
+        upload_cases = [
+            ("PCB", "NOMINAL", None),
+            ("PCB", "SOLDER_BRIDGE", None),
+            ("WELD", "NOMINAL", None),
+            ("WELD", "POROSITY_GAS_LOSS", None),
+            ("CNC", "NOMINAL", None),
+            ("CNC", "OUTER_RACE_FAULT", {"vibration_khz": 0.793, "vibration_rms_mms": 5.1, "temperature_c": 62.0, "line_speed_rpm": 5400}),
+        ]
+        for line, dtype, telemetry in upload_cases:
+            entry = next(x for x in manifest if x["line"] == line and x["defect_type"] == dtype)
             b64 = base64.b64encode((SAMPLES_DIR / entry["sample_id"] / "frame.png").read_bytes()).decode("ascii")
-            r = client.post(f"{base}/api/inspect", json={"line": "PCB", "custom_image_base64": b64})
+            payload: dict = {"line": line, "custom_image_base64": b64}
+            if telemetry:
+                payload["sensor_telemetry"] = telemetry
+            r = client.post(f"{base}/api/inspect", json=payload)
+            expected = "HEALTHY" if dtype == "NOMINAL" else "ESCALATE"
             if r.status_code == 200:
                 body = r.json()
+                tri = body["tier1_triage"]
+                got = tri["pass_status"]
                 results.append(
-                    f"- {label} (`{entry['sample_id']}`): gate=`{body['tier1_triage']['pass_status']}`, "
+                    f"- {line} {dtype} upload (`{entry['sample_id']}`{', Zone-C telemetry' if telemetry else ''}): "
+                    f"gate=`{got}` (expected `{expected}`, {'OK' if got == expected else 'MISMATCH'}), "
+                    f"visual vote=`{tri.get('t1b_vote')}` by `{tri['provenance_t1b'].get('model_id')}`, "
                     f"input_simulated=`{body['input_simulated']}`"
                 )
+            else:
+                results.append(f"- {line} {dtype} upload: HTTP `{r.status_code}`")
         results.append("")
 
         # 5. Co-pilot in 3 languages
@@ -143,6 +165,24 @@ def main() -> None:
             results.append(f"- Before disposition: HTTP `{wo_before.status_code}` (expected 400)")
             results.append(f"- Record HOLD disposition: HTTP `{d_resp.status_code}`")
             results.append(f"- After disposition: HTTP `{wo_after.status_code}` (producer=`{wo_after.json().get('extraction_producer') if wo_after.status_code == 200 else 'err'}`)")
+
+        # 7. Rate limiter (opt-in: it locks this IP out of /api/inspect for up to 10 minutes).
+        #    Uses malformed sample_ids, which are rejected AFTER the limiter charges a token, so no
+        #    model calls are spent.
+        if check_rate_limit:
+            results.append("")
+            results.append("## 7. Rate Limiter")
+            codes: list[int] = []
+            for _ in range(40):
+                rr = client.post(f"{base}/api/inspect", json={"sample_id": "bad id!"})
+                codes.append(rr.status_code)
+                if rr.status_code == 429:
+                    break
+            first_429 = codes.index(429) + 1 if 429 in codes else None
+            results.append(
+                f"- Malformed requests until HTTP 429: `{first_429}` (limit 30 per 10 min per IP; "
+                f"earlier inspections in this run also consumed tokens)"
+            )
 
     out_path = PROJECT_ROOT / "eval" / "live_verification.md"
     out_path.write_text("\n".join(results) + "\n", encoding="utf-8")
