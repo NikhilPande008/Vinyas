@@ -29,7 +29,7 @@ class StageProvenance(BaseModel):
     """Truthful provenance for every pipeline stage."""
 
     stage: str
-    producer: Literal["MODEL", "DETERMINISTIC", "FALLBACK_RULES", "FALLBACK_MODEL"]
+    producer: Literal["MODEL", "DETERMINISTIC", "FALLBACK_RULES", "FALLBACK_MODEL", "SKIPPED"]
     model_id: Optional[str] = None
     attempts: list[ModelAttempt] = Field(default_factory=list)
     latency_ms: int = Field(..., ge=0)
@@ -79,7 +79,7 @@ class Tier1TriageResult(BaseModel):
     short_circuited: bool = Field(default=False)
     t1a_flags: list[str] = Field(default_factory=list)
     t1a_summary: Optional[str] = None
-    t1b_vote: Optional[Literal["NOMINAL", "ANOMALY", "UNAVAILABLE"]] = None
+    t1b_vote: Optional[Literal["NOMINAL", "ANOMALY", "UNAVAILABLE", "SKIPPED"]] = None
     t1b_observations: list[str] = Field(default_factory=list)
     t1b_bbox_hint: Optional[list[int]] = None
     provenance_t1a: Optional[StageProvenance] = None

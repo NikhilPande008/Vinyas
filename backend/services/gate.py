@@ -1,8 +1,11 @@
 """Fail-safe Tier-1 decision combiner (`backend/services/gate.py`).
 
 Rule:
-  HEALTHY only if T1-A has no escalating flags AND T1-B succeeded with vote == "NOMINAL".
-  Any escalating T1-A flag, T1-B ANOMALY vote, or T1-B failure -> ESCALATE.
+  - When T1-B is SKIPPED (e.g. CNC, where the bearing is internal and not visible):
+    T1-A deterministic DSP decides (HEALTHY if no escalating flags, else ESCALATE).
+  - Otherwise:
+    HEALTHY only if T1-A has no escalating flags AND T1-B succeeded with vote == "NOMINAL".
+    Any escalating T1-A flag, T1-B ANOMALY vote, or T1-B failure -> ESCALATE.
 """
 
 from __future__ import annotations
@@ -13,9 +16,25 @@ from backend.dsp.envelope import T1AResult
 from backend.schemas import StageProvenance, Tier1TriageResult
 
 
+def make_skipped_t1b_provenance(
+    input_simulated: bool,
+    note: str = "bearing not visible; vibration-led",
+) -> StageProvenance:
+    """Return a truthful SKIPPED provenance entry when T1-B is intentionally bypassed."""
+    return StageProvenance(
+        stage="T1B_GATE",
+        producer="SKIPPED",
+        model_id=None,
+        attempts=[],
+        latency_ms=0,
+        input_simulated=input_simulated,
+        note=note,
+    )
+
+
 def combine_tier1_votes(
     t1a: T1AResult,
-    t1b_vote: Optional[Literal["NOMINAL", "ANOMALY", "UNAVAILABLE"]],
+    t1b_vote: Optional[Literal["NOMINAL", "ANOMALY", "UNAVAILABLE", "SKIPPED"]],
     t1b_confidence: float,
     t1b_observations: list[str],
     t1b_bbox_hint: Optional[list[int]],
@@ -33,6 +52,7 @@ def combine_tier1_votes(
         note=t1a.summary,
     )
 
+    t1b_skipped = t1b_vote == "SKIPPED"
     t1b_failed = t1b_vote is None or t1b_vote == "UNAVAILABLE"
     reasons: list[str] = []
 
@@ -51,11 +71,15 @@ def combine_tier1_votes(
     else:
         pass_status = "HEALTHY"
         info_note = f" (info: {', '.join(t1a.info_flags)})" if t1a.info_flags else ""
-        reason_text = f"Signal gate nominal{info_note} and visual gate voted NOMINAL."
+        if t1b_skipped:
+            skip_note = t1b_provenance.note or "bearing not visible; vibration-led"
+            reason_text = f"Signal gate nominal{info_note}; visual gate skipped ({skip_note})."
+        else:
+            reason_text = f"Signal gate nominal{info_note} and visual gate voted NOMINAL."
         conf = t1b_confidence
 
     total_t1_ms = t1a.latency_ms + t1b_provenance.latency_ms
-    executed_model = t1b_provenance.model_id or t1b_provenance.producer
+    executed_model = t1b_provenance.model_id or ("DETERMINISTIC_DSP" if t1b_skipped else t1b_provenance.producer)
 
     return Tier1TriageResult(
         pass_status=pass_status,

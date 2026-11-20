@@ -163,3 +163,47 @@ def test_skill_bpfo_threshold_matches_dsp_code():
     bpfo_db, harm_db = (int(float(x)) for x in m.groups())
     skill = (PROJECT_ROOT / ".agents/skills/bearing-acoustic-diagnostics/SKILL.md").read_text(encoding="utf-8")
     assert f"SNR >= {bpfo_db} dB" in skill and f"SNR >= {harm_db} dB" in skill
+
+
+def test_config_for_model_strips_thinking_config_for_models_that_reject_it():
+    from google.genai import types as genai_types
+    from backend.services.model_router import _config_for_model
+
+    base_cfg = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.1,
+        max_output_tokens=200,
+        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+    )
+    # Verified to reject thinking_budget=0 with 400 INVALID_ARGUMENT
+    assert _config_for_model("gemini-3.5-flash-lite", base_cfg).thinking_config is None
+    assert _config_for_model("gemma-4-26b-a4b-it", base_cfg).thinking_config is None
+    # Verified to accept thinking_budget=0
+    kept = _config_for_model("gemini-3.1-flash-lite", base_cfg)
+    assert kept.thinking_config is not None
+    assert kept.thinking_config.thinking_budget == 0
+    # Original config object is not mutated
+    assert base_cfg.thinking_config is not None
+
+
+def test_health_reports_degraded_when_routed_model_has_5_plus_errors_and_0_ok():
+    from fastapi.testclient import TestClient
+    from backend.main import app, model_router
+
+    model_router.metrics.reset()
+    client = TestClient(app)
+    assert client.get("/health").json()["status"] == "ok"
+
+    primary = model_router.settings.tier1_visual_gate_model
+    for _ in range(5):
+        model_router.metrics.record_attempt(primary, "ERROR", 400)
+
+    h = client.get("/health").json()
+    assert h["status"] == "degraded"
+    assert primary in h["degraded_models"]
+
+    model_router.metrics.record_attempt(primary, "OK", 900)
+    h2 = client.get("/health").json()
+    assert h2["status"] == "ok"
+    assert primary not in h2["degraded_models"]
+    model_router.metrics.reset()

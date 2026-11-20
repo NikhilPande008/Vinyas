@@ -82,12 +82,23 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
         base = url.rstrip("/")
 
     records: list[dict[str, Any]] = []
+    gt_from_local_manifest = 0
+    rate_limit_waits = 0
     try:
         for idx, entry in enumerate(samples, start=1):
             sid = entry["sample_id"]
-            t0 = time.perf_counter()
-            r = client.post(f"{base}/api/inspect", json={"sample_id": sid})
-            wall_ms = int((time.perf_counter() - t0) * 1000)
+            while True:
+                t0 = time.perf_counter()
+                r = client.post(f"{base}/api/inspect", json={"sample_id": sid})
+                wall_ms = int((time.perf_counter() - t0) * 1000)
+                if r.status_code == 429:
+                    retry_after = int(r.headers.get("Retry-After", "30"))
+                    wait_s = max(10, min(retry_after + 2, 120))
+                    rate_limit_waits += 1
+                    print(f"[{idx:02d}/{len(samples)}] {sid} HTTP 429 rate-limited; waiting {wait_s}s to refill...", flush=True)
+                    time.sleep(wait_s)
+                    continue
+                break
             if r.status_code != 200:
                 records.append(
                     {
@@ -101,7 +112,11 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
 
             insp = r.json()
             rev = client.get(f"{base}/api/rig/reveal/{sid}?eval=1", headers=eval_headers)
-            gt = rev.json() if rev.status_code == 200 else entry
+            if rev.status_code == 200:
+                gt = rev.json()
+            else:
+                gt = entry
+                gt_from_local_manifest += 1
 
             verdict = insp["tier1_triage"]["pass_status"]
             diag = insp.get("tier2_diagnosis")
@@ -142,6 +157,9 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
                 "unverified_values": unverified_cnt,
                 "fallback_stages": fallback_stages,
                 "t1b_model": insp["telemetry"].get("tier1_model_used"),
+                "t1b_producer": next(
+                    (p.get("producer") for p in insp.get("provenance", []) if p.get("stage") == "T1B_GATE"), None
+                ),
                 "t2_model": insp["telemetry"].get("tier2_model_used"),
                 "retrieval_producer": next(
                     (p.get("producer") for p in insp.get("provenance", []) if p.get("stage") == "RETRIEVAL"), None
@@ -206,7 +224,10 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
     # Who actually answered each model stage (not just whether the stage produced output)
     t1b_answered: dict[str, int] = {}
     for r in valid:
-        key = r.get("t1b_model") or "FALLBACK_RULES (gate unavailable)"
+        if r.get("t1b_producer") == "SKIPPED":
+            key = "SKIPPED (CNC vibration-led)"
+        else:
+            key = r.get("t1b_model") or "FALLBACK_RULES (gate unavailable)"
         t1b_answered[key] = t1b_answered.get(key, 0) + 1
     t2_by_model = [r for r in t2_eval if r.get("t2_model")]
     t2_by_rules = [r for r in t2_eval if not r.get("t2_model")]
@@ -242,6 +263,8 @@ def run_eval(target: str, url: str, n: int) -> dict[str, Any]:
         "n_requested": len(samples),
         "n_completed": len(valid),
         "n_errors": len(records) - len(valid),
+        "gt_from_local_manifest": gt_from_local_manifest,
+        "rate_limit_waits": rate_limit_waits,
         "confusion_matrix": {"tp": tp, "fn": fn, "fp": fp, "tn": tn},
         "defect_recall_pct": recall,
         "false_escalation_nominal_pct": fer_nom,
@@ -285,7 +308,8 @@ def write_markdown(summary: dict[str, Any], out_path: Path) -> None:
         f"> {summary['header']}",
         "",
         f"- **Timestamp (UTC):** {summary['timestamp_utc']}",
-        f"- **Samples evaluated:** {summary['n_completed']} / {summary['n_requested']} (errors: {summary['n_errors']})",
+        f"- **Samples evaluated:** {summary['n_completed']} / {summary['n_requested']} (errors: {summary['n_errors']}, rate-limit waits: {summary.get('rate_limit_waits', 0)})",
+        f"- **Ground truth from local manifest (when `/api/rig/reveal` returned 403/other):** `{summary.get('gt_from_local_manifest', 0)} / {summary['n_completed']}`",
         "",
         "## Gate Confusion Matrix (Tier-1: DSP + hedged visual gate)",
         "",

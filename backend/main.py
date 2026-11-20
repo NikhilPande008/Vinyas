@@ -51,7 +51,7 @@ from backend.schemas import (
     WorkOrderCreate,
     WorkOrderRecord,
 )
-from backend.services.gate import combine_tier1_votes
+from backend.services.gate import combine_tier1_votes, make_skipped_t1b_provenance
 from backend.services.metrics import compute_gate_token_accounting
 from backend.services.model_router import GoogleModelRouter
 from backend.services.overlay import render_model_bbox_overlay
@@ -112,8 +112,32 @@ async def health_check() -> dict[str, Any]:
     """Health & readiness endpoint with truthful runtime counters and routing config."""
     settings = get_settings()
     skills_status = skill_loader.list_skills_status()
+    metrics_snap = model_router.metrics.snapshot()
+    routed_models = {
+        m
+        for m in (
+            settings.tier1_visual_gate_model,
+            settings.tier1_fallback_model,
+            settings.tier1_second_fallback_model,
+            settings.tier2_primary_model,
+            settings.tier2_fallback_model,
+            settings.tier4_live_copilot_model,
+            settings.tier4_fallback_model,
+            settings.tier4_second_fallback_model,
+            settings.wo_extract_model,
+        )
+        if m
+    }
+    degraded_models = sorted(
+        m
+        for m in routed_models
+        if m in metrics_snap
+        and (metrics_snap[m].get("ok", 0) + metrics_snap[m].get("errors", 0)) >= 5
+        and metrics_snap[m].get("ok", 0) == 0
+    )
     return {
-        "status": "ok",
+        "status": "degraded" if degraded_models else "ok",
+        "degraded_models": degraded_models,
         "service": "Vinyas — Manufacturing Quality & Predictive Maintenance Platform",
         "cloud_run_ready": True,
         "gcp_project_id": settings.resolved_project_id,
@@ -124,7 +148,7 @@ async def health_check() -> dict[str, Any]:
         "loaded_skills_count": len(skills_status),
         "skills": skills_status,
         "routing_config": model_router.get_routing_config(),
-        "model_metrics": model_router.metrics.snapshot(),
+        "model_metrics": metrics_snap,
     }
 
 
@@ -311,15 +335,19 @@ async def run_edge_to_cloud_inspection(
         wav_path=wav_path,
     )
 
-    # STAGE 1B: Visual/Context Gate (staggered hedge over settings.t1b_candidates)
-    t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
-        line=line,
-        line_meta=line_meta,
-        t1a_features=t1a_result.features,
-        t1a_flags=t1a_result.all_flags,
-        raw_image_bytes=raw_image_bytes,
-        input_simulated=input_simulated,
-    )
+    # STAGE 1B: Visual/Context Gate (skipped on CNC: bearing is internal and not visible)
+    if line == "CNC":
+        t1b_vote, t1b_conf, t1b_obs, t1b_bbox = "SKIPPED", 1.0, [], None
+        t1b_prov = make_skipped_t1b_provenance(input_simulated=input_simulated)
+    else:
+        t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
+            line=line,
+            line_meta=line_meta,
+            t1a_features=t1a_result.features,
+            t1a_flags=t1a_result.all_flags,
+            raw_image_bytes=raw_image_bytes,
+            input_simulated=input_simulated,
+        )
 
     # Combine T1-A and T1-B votes (fail-safe)
     tier1_result = combine_tier1_votes(
@@ -539,14 +567,18 @@ async def run_batch_line_run(
         line_meta = LINE_DEFINITIONS[line]
 
         t1a = evaluate_t1a_signal_gate(line=line, telemetry=telemetry, wav_path=wav_path)
-        t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
-            line=line,
-            line_meta=line_meta,
-            t1a_features=t1a.features,
-            t1a_flags=t1a.all_flags,
-            raw_image_bytes=raw_img,
-            input_simulated=True,
-        )
+        if line == "CNC":
+            t1b_vote, t1b_conf, t1b_obs, t1b_bbox = "SKIPPED", 1.0, [], None
+            t1b_prov = make_skipped_t1b_provenance(input_simulated=True)
+        else:
+            t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
+                line=line,
+                line_meta=line_meta,
+                t1a_features=t1a.features,
+                t1a_flags=t1a.all_flags,
+                raw_image_bytes=raw_img,
+                input_simulated=True,
+            )
         t1_res = combine_tier1_votes(
             t1a=t1a,
             t1b_vote=t1b_vote,
