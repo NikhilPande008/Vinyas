@@ -31,12 +31,12 @@ Per Startup Buildathon India 2026 organiser ruling, physical factory hardware is
 ```mermaid
 flowchart LR
     MR["Mock Rig v2 (SIMULATED INPUT)\n60 seeded samples, hidden manifest"] --> T1A["T1-A: Deterministic DSP\nbackend/dsp/envelope.py\nBPFO Hilbert FFT / Process Windows"]
-    MR --> T1B["T1-B: Visual/Context Gate\ngemma-4-26b-a4b-it\n(fallback: gemini-3.1-flash-lite)"]
+    MR --> T1B["T1-B: Visual Gate (staggered hedge)\ngemini-3.5-flash-lite\n→ gemma-4-26b-a4b-it → gemini-3.1-flash-lite"]
     T1A --> GATE{"Fail-Safe Gate\nbackend/services/gate.py"}
     T1B --> GATE
     GATE -- "Both Nominal" --> PASS["HEALTHY\n(0 Tier-2 tokens)"]
     GATE -- "Any Flag / Error" --> RET["SOP Retrieval (18 SOPs)\ngemini-embedding-2 cosine\n(fallback: keyword)"]
-    RET --> T2["T2: Root-Cause Diagnosis\nHedged: gemini-3.1-flash-lite / gemini-3.8-flash\n+ Active SKILL.md"]
+    RET --> T2["T2: Root-Cause Diagnosis\nHedged: gemini-3.1-flash-lite / gemini-3.5-flash-lite\n+ Active SKILL.md"]
     T2 --> GUARD["SOP Numeric Guard\nbackend/services/sop_guard.py"]
     T2 --> ECON["Deterministic Economics\nbackend/services/economics.py"]
     T2 --> T3["T3: Deterministic Overlay\nbackend/services/overlay.py\n(Model bbox only)"]
@@ -49,15 +49,15 @@ flowchart LR
 
 ## Google AI Models Used (Verified & Measured)
 
-Model routing was selected by live benchmark in [eval/model_selection.md](eval/model_selection.md). `gemini-4-hydrogen` scored `0/8` (timeouts/503) in the benchmark and was removed from routing.
+Each model was chosen by a live benchmark whose decision rule was fixed before the run: the visual gate by [eval/visual_gate_benchmark.md](eval/visual_gate_benchmark.md) and Tier-2 by [eval/model_selection.md](eval/model_selection.md). `gemini-4-hydrogen` scored `0/8` (timeouts/503) in [run 1](eval/model_selection_run1.md) and `gemini-3.8-flash` hit `429` quota on every call in run 2, so neither is routed.
 
 | Role | Exact Model ID | Code Location | Why This Model | Fallback (Labelled) | Measured p50 |
 | --- | --- | --- | --- | --- | ---: |
-| T1-A Signal Gate | Deterministic DSP (NumPy/SciPy) | `backend/dsp/envelope.py:evaluate_t1a_signal_gate` | Millisecond Hilbert envelope FFT & window checks; an LLM should not run FFTs. | None needed | `0 ms` (p95 `10 ms`) |
-| T1-B Visual Gate | `gemma-4-26b-a4b-it` | `backend/services/model_router.py:run_tier1_visual_gate` | Cloud-served stand-in for an on-prem Gemma edge model; screens frames before Tier-2. | `gemini-3.1-flash-lite`, then fail-safe `ESCALATE` | `4,933 ms` (p95 `8,053 ms`) |
+| T1-A Signal Gate | Deterministic DSP (NumPy/SciPy) | `backend/dsp/envelope.py:evaluate_t1a_signal_gate` | Millisecond Hilbert envelope FFT & window checks; an LLM should not run FFTs. | None needed | `0 ms` (p95 `20 ms`) |
+| T1-B Visual Gate | `gemini-3.5-flash-lite` → `gemma-4-26b-a4b-it` → `gemini-3.1-flash-lite` (staggered hedge: next model after 3 s or on failure, 12 s cap) | `backend/services/model_router.py:run_tier1_visual_gate` | Cheap image screen before Tier-2; order chosen by `eval/visual_gate_benchmark.md`. Gemma 4 is the backup and the model family an on-prem edge box would run. | Fail-safe `ESCALATE` (human review) if all three fail | `7.7 s` (p95 `10.0 s`) |
 | SOP Retrieval | `gemini-embedding-2` (`768-D`) | `backend/db/demo_store.py:search_sops` | Real cosine similarity across 18 SOPs (including distractors), cached in SQLite. | `KEYWORD FALLBACK` | Measured per request |
-| T2 Root-Cause Diagnosis | `gemini-3.1-flash-lite` (primary), hedged with `gemini-3.8-flash` | `backend/services/model_router.py:run_tier2_multimodal_diagnosis` | Highest live availability & agreement in `eval/model_selection.md`; strict Pydantic schema + bbox. | `FALLBACK_RULES` (AI unavailable) | `5,623 ms` (p95 `12,002 ms`) |
-| T3 Visual Overlay | Deterministic Pillow (model bbox) | `backend/services/overlay.py:render_model_bbox_overlay` | Draws only model-returned bbox + SOP spec on native image resolution. | No box if no bbox / `NO_DEFECT_FOUND` | `43 ms` (p95 `46 ms`) |
+| T2 Root-Cause Diagnosis | `gemini-3.1-flash-lite` (primary), hedged with `gemini-3.5-flash-lite` after 5.7 s | `backend/services/model_router.py:run_tier2_multimodal_diagnosis` | Best agreement within the p95 limit in `eval/model_selection.md`; strict Pydantic schema + bbox. | `FALLBACK_RULES` (AI unavailable; no money figure shown) | `5.4 s` (p95 `14.9 s`) |
+| T3 Visual Overlay | Deterministic Pillow (model bbox) | `backend/services/overlay.py:render_model_bbox_overlay` | Draws only model-returned bbox + SOP spec on native image resolution. | No box if no bbox / `NO_DEFECT_FOUND` | `42 ms` (p95 `65 ms`) |
 | T4 Floor Co-Pilot | `gemini-3.8-live` (WS `/api/live-copilot`) | `backend/services/model_router.py:run_tier4_live_copilot` | Bidirectional audio + transcript in EN / हिन्दी / मराठी for gloved operators. | `gemini-3.1-flash-lite` text + device TTS (`REST /api/copilot/chat`) | Measured per turn |
 | Work-Order Extraction | `gemini-3.1-flash-lite` | `backend/db/demo_store.py:create_work_order` | Extracts `part_code`, `shift_priority`, `required_spares`, `sla_risk` from EN/HI/MR notes. | `FALLBACK_RULES` regex | Measured per WO |
 
@@ -67,15 +67,21 @@ Model routing was selected by live benchmark in [eval/model_selection.md](eval/m
 
 > Measured on simulated inputs generated by backend/mock_rig (organiser-approved, no hardware). Not field accuracy.
 
-- **Samples evaluated:** `18 / 18` balanced across PCB, CNC, and WELD (`7` true defects, `11` nominal/hard negatives, `0` errors)
-- **True-defect recall:** `100.0%` (`7/7`, false negatives: `[]`)
-- **False-escalation rate (nominal / hard negatives):** `100.0%` during this run because free-tier `gemma-4-26b-a4b-it` / `gemini-3.1-flash-lite` hit `503 UNAVAILABLE` / `5 s` timeouts on `15/18` calls and our **fail-safe gate** escalated unavailable visual checks to human review (see `eval/RESULTS.md` fallback breakdown)
-- **Tier-2 defect-type agreement (on escalated true defects):** `6/7 (85.7%)`
-- **SOP-guard unverified numeric values:** `0`
-- **Measured latencies (p50 / p95):** T1-A DSP `0 / 10 ms`, T1-B Visual Gate `4,933 / 8,053 ms`, T2 Diagnosis `5,623 / 12,002 ms`, T3 Overlay `43 / 46 ms`, End-to-End `16,213 / 20,652 ms`
-- **Measured token accounting (`N=18`, batch defect rate `38.9%`):** Gated `37,064` tokens vs estimated cloud-only `63,702` tokens (`18 × 3,539` mean T2 tokens) → `41.8%` measured token saving at this batch defect rate (real plant savings depend on the plant's actual defect rate and live API availability).
+Full pipeline, 30 parts (10 per line), real free-tier Gemini calls, in-process run (`python scripts/eval_pipeline.py --target local --n 30`; details and caveats in [eval/RESULTS.md](eval/RESULTS.md)):
 
-Full run artifacts: [eval/RESULTS.md](eval/RESULTS.md) and [eval/model_selection.md](eval/model_selection.md).
+- **Gate:** `10/10` true defects escalated, `20/20` nominal and hard-negative parts cleared (`0` false escalations, `0` false negatives).
+- **Who answered the visual gate:** `gemini-3.1-flash-lite` 14, `gemini-3.5-flash-lite` 11, `gemma-4-26b-a4b-it` 4, none (fail-safe hold) 1 — the hedge moved to backups whenever the primary returned `503` or was slow.
+- **Tier-2 defect type on escalated defects:** `8/10` — Gemini `6/8` (both misses called insufficient solder a bridge), rule-based fallback `2/2` when Tier-2 was unavailable.
+- **SOP guard:** `0` unverified numeric values in Tier-2 steps.
+- **Latency p50 / p95:** DSP `0 / 20 ms`, visual gate `7.7 / 10.0 s`, Tier-2 `5.4 / 14.9 s`, overlay `42 / 65 ms`, end-to-end `8.1 / 22.0 s` (healthy parts stop after Tier-1).
+- **Token effect of the gate:** `+22.3%` fewer tokens than sending all 30 parts to Tier-2 (`76,269` vs `98,190`; escalations charged at the mean measured Tier-2 cost of `3,273`, so failed calls never count as savings). This depends on the defect rate (`33%` here) and on the visual gate being available; when it is not, parts escalate and the effect turns negative.
+- **Retrieval:** this run used the keyword fallback because of an SDK bug fixed afterwards; a spot check with real `gemini-embedding-2` put the correct SOP in the top 3 for all 4 test queries but first for only 1 of 4, so Tier-2 chooses the final SOP from the top 3.
+
+Component benchmarks (decision rules fixed before each run):
+- **DSP gate alone, all 60 parts, no API:** `19/21` defects flagged, `0/39` false flags; the 2 misses are PCB defects with in-window reflow telemetry that only the camera can see ([eval/dsp_gate_calibration.md](eval/dsp_gate_calibration.md)).
+- **Visual gate, 46 frames in upload mode:** `gemini-3.5-flash-lite` caught `14/14` visible defects with `0/32` false alarms ([eval/visual_gate_benchmark.md](eval/visual_gate_benchmark.md)).
+- **Tier-2, 8 defect samples:** `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite` both `6/8`; `gemini-3.8-flash` had no quota ([eval/model_selection.md](eval/model_selection.md)).
+- **Live Cloud Run verification (`vinyas-ai-00003-87m`):** `9/9` blind draws accurate (including `WRENCH_STRIKE` rejection), `6/6` custom upload checks accurate across PCB/WELD/CNC, `3/3` `gemini-3.8-live` audio turns live in EN/HI/MR (`6.7–7.3 s`), `400 -> 200` disposition gating + live Hindi WO extraction, `p50 = 7.27 s` ([eval/live_verification.md](eval/live_verification.md)).
 
 ---
 
@@ -110,8 +116,10 @@ Full run artifacts: [eval/RESULTS.md](eval/RESULTS.md) and [eval/model_selection
 
 ## Limitations (Honest List)
 - **Simulated inputs only:** No physical camera or accelerometer is connected (`backend/mock_rig/`).
+- **Easy synthetic defects:** The visual gate caught every visible defect in `eval/visual_gate_benchmark.md`, and the DSP gate separates outer-race faults by ~28 dB. Both are measured on clean procedural frames and signals; real photos and real spindle data will be harder, and no real-image accuracy has been measured.
+- **Free-tier availability:** Visual-gate and Tier-2 calls regularly return `503`/`429`. The hedges cut the impact, but when every model fails the part is held for human review (fail-safe), so healthy parts can be held during an outage.
 - **Demo SQLite storage:** Incidents, dispositions, and work orders reset whenever Cloud Run restarts a container (`infra/alloydb_schema.sql` is design-only).
-- **API availability & quota:** Free-tier Gemini API experienced `503 UNAVAILABLE` spikes on newer preview models during testing; all 4 Nano Banana image models returned `429 RESOURCE_EXHAUSTED`, so generative Tier-3 images are omitted.
+- **Image-model quota:** All 4 Nano Banana image models returned `429 RESOURCE_EXHAUSTED` on this key, so generative Tier-3 images are omitted; `gemini-3.8-flash` also had no quota.
 - **Voice input browser support:** Web Speech API (`SpeechRecognition`) requires Chrome/Edge; unsupported browsers prompt the operator to type instead.
 - **Unvalidated economics & no customer interviews yet:** INR avoidable-loss figures are unvalidated team assumptions (`docs/ASSUMPTIONS.md`).
 
@@ -137,8 +145,13 @@ Full run artifacts: [eval/RESULTS.md](eval/RESULTS.md) and [eval/model_selection
 pip install -r requirements.txt
 cd frontend && npm ci && npm run build && cd ..
 
-# 2. Run fast offline test suite (<2 s, no API key needed)
+# 2. Run fast offline test suite (~3 s, no API key needed)
 pytest -v
+
+# 2b. Reproduce the measurements in eval/ (the last two commands call the Gemini API)
+python scripts/calibrate_dsp_gate.py                 # DSP gate vs hidden manifest, no API calls
+python scripts/benchmark_visual_gate.py gemma-4-26b-a4b-it,gemini-3.5-flash-lite,gemini-3.1-flash-lite
+python scripts/eval_pipeline.py --target local --n 30
 
 # 3. Run locally (set GEMINI_API_KEY in .env)
 uvicorn backend.main:app --host 0.0.0.0 --port 8080

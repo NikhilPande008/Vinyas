@@ -71,3 +71,37 @@ class ModelMetricsRegistry:
     def reset(self) -> None:
         with self._lock:
             self._stats.clear()
+
+
+def compute_gate_token_accounting(
+    n_parts: int,
+    t1_tokens_total: int,
+    n_escalated: int,
+    t2_success_tokens: list[int],
+) -> dict[str, Any]:
+    """Token effect of the Tier-1 gate, independent of Tier-2 API failures.
+
+    A failed Tier-2 call spends ~0 tokens; counting it as a "saving" would reward outages.
+    So every escalated part is charged the mean measured Tier-2 cost of the calls that
+    succeeded, and the cloud-only baseline charges that same mean to every part:
+
+        gated      = sum(T1 tokens over all parts) + n_escalated x mean(T2 tokens)
+        cloud_only = n_parts x mean(T2 tokens)
+        saving_pct = 100 x (1 - gated / cloud_only)   (negative when the gate escalates everything)
+    """
+    mean_t2 = int(statistics.mean(t2_success_tokens)) if t2_success_tokens else 0
+    gated = int(t1_tokens_total + n_escalated * mean_t2)
+    cloud_only = int(n_parts * mean_t2)
+    saving_pct = round(100.0 * (1.0 - gated / cloud_only), 1) if cloud_only > 0 else None
+    return {
+        "n_parts": n_parts,
+        "n_escalated": n_escalated,
+        "t1_tokens_total": int(t1_tokens_total),
+        "t2_calls_succeeded": len(t2_success_tokens),
+        "t2_calls_failed": max(0, n_escalated - len(t2_success_tokens)),
+        "mean_t2_tokens": mean_t2,
+        "gated_tokens": gated,
+        "cloud_only_tokens": cloud_only,
+        "saving_pct": saving_pct,
+        "method": "gated = T1 tokens (all parts) + escalations x mean measured T2 tokens; cloud_only = N x mean measured T2 tokens",
+    }

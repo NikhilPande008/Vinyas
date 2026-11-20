@@ -17,6 +17,7 @@ import io
 import json
 import sys
 import time
+from types import SimpleNamespace
 import uuid
 import wave
 from typing import Any, Literal, Optional
@@ -34,7 +35,7 @@ from backend.schemas import (
     StageProvenance,
     Tier2DiagnosisResult,
 )
-from backend.services.economics import calculate_avoidable_loss
+from backend.services.economics import ECONOMICS_NOT_ESTIMATED, calculate_avoidable_loss
 from backend.services.metrics import ModelMetricsRegistry
 from backend.services.sop_guard import (
     build_allowed_values_set,
@@ -131,6 +132,108 @@ def _strip_json_fences(raw: str) -> str:
     return txt
 
 
+def _to_jpeg_bytes(raw_bytes: bytes, quality: int = 82) -> tuple[bytes, str]:
+    """Compress PNG/image bytes to JPEG for faster multimodal upload; fall back to PNG on error."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            rgb = img.convert("RGB")
+            buf = io.BytesIO()
+            rgb.save(buf, format="JPEG", quality=quality, optimize=True)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return raw_bytes, "image/png"
+
+
+def _config_for_model(model_id: str, config: Optional[Any]) -> Optional[Any]:
+    """Strip thinking_config for Gemma models that do not support it."""
+    if config is None or genai_types is None:
+        return config
+    if model_id.lower().startswith("gemma") and getattr(config, "thinking_config", None) is not None:
+        return config.model_copy(update={"thinking_config": None})
+    return config
+
+
+_T1B_LINE_GUIDE: dict[str, dict[str, str]] = {
+    "PCB": {
+        "subject": "a 4-sided QFP IC soldered to an automotive SMT PCB",
+        "regions": "the four rows of leads: top, right, bottom, left",
+        "region_keys": "top, right, bottom, left",
+        "defects": (
+            "(1) solder bridge: a solder blob or bright metallic mass touching or joining two or more adjacent leads; "
+            "(2) insufficient solder: pads that look dark, brown, bare or clearly different from the neighbouring pads"
+        ),
+        "not_defects": "a soft translucent haze or glare on the green solder mask away from the leads (no-clean flux residue)",
+    },
+    "WELD": {
+        "subject": "a robotic MIG weld bead on steel plate",
+        "regions": "the weld bead along its length: left third, centre third, right third",
+        "region_keys": "left, centre, right",
+        "defects": "porosity: dark pits, holes or wormholes on the weld bead itself, often clustered",
+        "not_defects": "small round droplets on the plate beside an otherwise clean bead (cosmetic spatter)",
+    },
+    "CNC": {
+        "subject": "the machined face of a part from a CNC spindle (the spindle bearing is inside the housing and is NOT visible)",
+        "regions": "the machined surface: centre bore, inner ring, outer ring",
+        "region_keys": "bore, inner, outer",
+        "defects": "visible cracks, chips, gouges, chatter marks or burn marks on the machined surface",
+        "not_defects": "regular concentric turning marks and drilled bolt holes",
+    },
+}
+
+
+class _NonEmptyText:
+    """Parse result for free-text answers: rejects empty text so the hedge tries the next model."""
+
+    def __init__(self, text: str) -> None:
+        if not (text or "").strip():
+            raise ValueError("empty response text")
+        self.text = text
+
+
+def build_t1b_prompt(
+    line: str,
+    line_meta: dict[str, Any],
+    t1a_features: dict[str, Any],
+    t1a_flags: list[str],
+) -> str:
+    """Tier-1B visual-gate prompt. Contains no sample label, scenario name or expected answer."""
+    guide = _T1B_LINE_GUIDE.get(line.upper(), _T1B_LINE_GUIDE["PCB"])
+    return (
+        "You are the visual screening gate on an automotive production line. You decide whether a quality "
+        "engineer needs to look at this part. A missed defect ships a faulty part; a false alarm only costs a "
+        "quick human look.\n"
+        f"Machine: {line_meta.get('machine_id')} ({line_meta.get('line_name')}).\n"
+        f"The image shows {guide['subject']}. Inspect {guide['regions']}, one by one.\n"
+        f"Report ANOMALY if you see: {guide['defects']}.\n"
+        f"Not a defect: {guide['not_defects']}.\n"
+        f"Sensor context (measured numbers, not a verdict): features={json.dumps(t1a_features)}, "
+        f"flags={json.dumps(t1a_flags)}.\n\n"
+        "Return strict JSON only, with keys in this order:\n"
+        f'- "checks": object with keys {guide["region_keys"]}, each a short factual description of what you see\n'
+        '- "observations": list of 1-3 short factual observations\n'
+        '- "vote": "NOMINAL" or "ANOMALY"\n'
+        '- "confidence": float 0.0 to 1.0\n'
+        '- "bbox_hint": [ymin, xmin, ymax, xmax] integers 0-1000 around a visible defect, or null'
+    )
+
+
+def parse_t1b_response(text: str) -> tuple[Literal["NOMINAL", "ANOMALY"], float, list[str], Optional[list[int]]]:
+    """Validate a Tier-1B JSON answer; raises ValueError on anything malformed."""
+    parsed = json.loads(_strip_json_fences(text))
+    vote_raw = str(parsed.get("vote", "")).upper()
+    if vote_raw not in ("NOMINAL", "ANOMALY"):
+        raise ValueError(f"Invalid vote: {vote_raw}")
+    conf = float(parsed.get("confidence", 0.7))
+    obs = [str(o) for o in (parsed.get("observations") or [])][:4]
+    bbox = parsed.get("bbox_hint")
+    bbox_clean: Optional[list[int]] = None
+    if isinstance(bbox, list) and len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
+        bbox_clean = [max(0, min(1000, int(v))) for v in bbox]
+    return ("NOMINAL" if vote_raw == "NOMINAL" else "ANOMALY"), conf, obs, bbox_clean
+
+
 class GoogleModelRouter:
     """Multi-model Google GenAI orchestrator with hedged routing, provenance, and metrics."""
 
@@ -141,7 +244,7 @@ class GoogleModelRouter:
         if self._client is None and genai is not None and self.settings.gemini_api_key:
             try:
                 http_opts = (
-                    genai_types.HttpOptions(timeout=12000)
+                    genai_types.HttpOptions(timeout=25000)
                     if genai_types is not None and hasattr(genai_types, "HttpOptions")
                     else None
                 )
@@ -166,6 +269,8 @@ class GoogleModelRouter:
             "t1a_signal_gate": "deterministic DSP (NumPy/SciPy)",
             "t1b_visual_gate_primary": self.settings.tier1_visual_gate_model,
             "t1b_visual_gate_fallback": self.settings.tier1_fallback_model,
+            "t1b_hedge_order": self.settings.t1b_candidates,
+            "t1b_hedge_delay_sec": self.settings.tier1_hedge_delay_sec,
             "t2_diagnosis_primary": self.settings.tier2_primary_model,
             "t2_diagnosis_fallback": self.settings.tier2_fallback_model,
             "t2_hedge_delay_sec": self.settings.tier2_hedge_delay_sec,
@@ -197,15 +302,23 @@ class GoogleModelRouter:
             return None, attempt
 
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
+            effective_cfg = _config_for_model(model_id, config)
+            aio_client = getattr(self._client, "aio", None)
+            aio_models = getattr(aio_client, "models", None) if aio_client is not None else None
+            if aio_models is not None and hasattr(aio_models, "generate_content"):
+                coro = aio_models.generate_content(
+                    model=model_id,
+                    contents=contents,
+                    config=effective_cfg,
+                )
+            else:
+                coro = asyncio.to_thread(
                     self._client.models.generate_content,
                     model=model_id,
                     contents=contents,
-                    config=config,
-                ),
-                timeout=timeout_sec,
-            )
+                    config=effective_cfg,
+                )
+            response = await asyncio.wait_for(coro, timeout=timeout_sec)
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             in_tok, out_tok = _extract_tokens(response)
             if response and getattr(response, "text", None):
@@ -266,6 +379,91 @@ class GoogleModelRouter:
                 return resp, model_id, attempts
         return None, None, attempts
 
+    async def _run_staggered_hedge(
+        self,
+        stage: str,
+        candidates: list[str],
+        contents: Any,
+        config: Any,
+        parse_fn: Any,
+        stagger_sec: float,
+        total_timeout_sec: float,
+    ) -> tuple[Optional[Any], Optional[str], list[ModelAttempt]]:
+        """Start candidates[0]; start the next one when the previous fails or after `stagger_sec`.
+
+        The first schema-valid answer wins. Every attempt is recorded; calls still running when a
+        winner arrives are recorded as SKIPPED (their threads finish in the background).
+        """
+        deadline = time.perf_counter() + total_timeout_sec
+        attempts: list[ModelAttempt] = []
+        pending: dict[asyncio.Task[Any], str] = {}
+        next_idx = 0
+
+        def _launch() -> None:
+            nonlocal next_idx
+            model_id = candidates[next_idx]
+            remaining = max(0.5, deadline - time.perf_counter())
+            task = asyncio.create_task(
+                self._call_single_model(
+                    stage=stage,
+                    model_id=model_id,
+                    contents=contents,
+                    config=config,
+                    timeout_sec=remaining,
+                    is_fallback=(next_idx > 0),
+                )
+            )
+            pending[task] = model_id
+            next_idx += 1
+
+        _launch()
+        while pending:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            wait_for = min(stagger_sec, remaining) if next_idx < len(candidates) else remaining
+            done, _ = await asyncio.wait(set(pending), timeout=wait_for, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                if next_idx < len(candidates):
+                    _launch()
+                continue
+            for task in done:
+                model_id = pending.pop(task)
+                resp, att = task.result()
+                if resp is not None:
+                    try:
+                        parsed = parse_fn(resp.text)
+                    except Exception as exc:  # noqa: BLE001 - any malformed answer is a schema failure
+                        att.status = "SCHEMA_INVALID"
+                        att.error = f"schema validation failed: {str(exc)[:100]}"
+                    else:
+                        attempts.append(att)
+                        for other_task, other_model in pending.items():
+                            other_task.cancel()
+                            attempts.append(
+                                ModelAttempt(
+                                    model_id=other_model,
+                                    status="SKIPPED",
+                                    latency_ms=0,
+                                    error="superseded by a faster hedged answer",
+                                )
+                            )
+                        return parsed, model_id, attempts
+                attempts.append(att)
+                if next_idx < len(candidates):
+                    _launch()
+        for other_task, other_model in pending.items():
+            other_task.cancel()
+            attempts.append(
+                ModelAttempt(
+                    model_id=other_model,
+                    status="TIMEOUT",
+                    latency_ms=int(total_timeout_sec * 1000),
+                    error="gate deadline reached",
+                )
+            )
+        return None, None, attempts
+
     async def run_tier1_visual_gate(
         self,
         line: str,
@@ -282,97 +480,50 @@ class GoogleModelRouter:
         Optional[list[int]],
         StageProvenance,
     ]:
-        """Tier-1B visual/context gate (`gemma-4-26b-a4b-it`, fallback `gemini-3.1-flash-lite`)."""
+        """Tier-1B visual/context gate: staggered hedge across `settings.t1b_candidates`."""
         t0 = time.perf_counter()
         attempts: list[ModelAttempt] = []
 
         if not force_fallback and self._client is not None and genai_types is not None:
-            line_u = line.upper()
-            if line_u == "CNC":
-                domain_note = (
-                    "Line type: CNC machined part surface. Note: the spindle bearing is internal and "
-                    "not visible in this camera frame; judge only whether the machined surface looks "
-                    "visually abnormal, and note any signal flags provided."
-                )
-            elif line_u == "PCB":
-                domain_note = (
-                    "Line type: Automotive SMT PCB (4-sided QFP IC). Look carefully for conductive solder "
-                    "bridges spanning adjacent leads or starved/missing solder fillets on pads. "
-                    "Translucent glossy glare off the leads on the green solder mask is cosmetic flux residue, not a bridge."
-                )
-            else:
-                domain_note = (
-                    "Line type: Robotic MIG steel weld seam. Look carefully for dark clustered porosity "
-                    "pits/wormholes directly on the weld bead. Small droplets scattered on the plate "
-                    "beside an otherwise clean bead are cosmetic spatter, not seam porosity."
-                )
-
-            prompt = (
-                "You are a manufacturing quality visual gate. Inspect the image and numeric sensor features.\n"
-                f"Machine: {line_meta.get('machine_id')} ({line_meta.get('line_name')})\n"
-                f"{domain_note}\n"
-                f"T1-A Signal Features: {json.dumps(t1a_features)}\n"
-                f"T1-A Flags: {json.dumps(t1a_flags)}\n\n"
-                "Return strict JSON only with keys:\n"
-                '- "vote": "NOMINAL" or "ANOMALY"\n'
-                '- "confidence": float 0.0 to 1.0\n'
-                '- "observations": list of 1-3 short factual visual/feature observations\n'
-                '- "bbox_hint": optional [ymin, xmin, ymax, xmax] integers 0-1000 around a visible defect, or null'
-            )
-            image_part = genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png")
-            cfg = genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            )
-            resp, used_model, attempts = await self._call_genai_with_retry(
+            prompt = build_t1b_prompt(line, line_meta, t1a_features, t1a_flags)
+            img_bytes, img_mime = _to_jpeg_bytes(raw_image_bytes)
+            image_part = genai_types.Part.from_bytes(data=img_bytes, mime_type=img_mime)
+            cfg_kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 260,
+            }
+            if hasattr(genai_types, "ThinkingConfig"):
+                cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            cfg = genai_types.GenerateContentConfig(**cfg_kwargs)
+            parsed, used_model, attempts = await self._run_staggered_hedge(
                 stage="T1B_GATE",
-                model_candidates=[
-                    self.settings.tier1_visual_gate_model,
-                    self.settings.tier1_fallback_model,
-                ],
+                candidates=self.settings.t1b_candidates,
                 contents=[image_part, prompt],
                 config=cfg,
-                timeout_sec=5.0,
+                parse_fn=parse_t1b_response,
+                stagger_sec=self.settings.tier1_hedge_delay_sec,
+                total_timeout_sec=self.settings.tier1_total_timeout_sec,
             )
-            if resp and used_model and getattr(resp, "text", None):
-                try:
-                    parsed = json.loads(_strip_json_fences(resp.text))
-                    vote_raw = str(parsed.get("vote", "")).upper()
-                    if vote_raw not in ("NOMINAL", "ANOMALY"):
-                        raise ValueError(f"Invalid vote: {vote_raw}")
-                    conf = float(parsed.get("confidence", 0.7))
-                    obs = [str(o) for o in (parsed.get("observations") or [])][:4]
-                    bbox = parsed.get("bbox_hint")
-                    if isinstance(bbox, list) and len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
-                        bbox_clean: Optional[list[int]] = [max(0, min(1000, int(v))) for v in bbox]
-                    else:
-                        bbox_clean = None
-                    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                    is_primary = used_model == self.settings.tier1_visual_gate_model
-                    note = (
-                        "Gemma 4 (cloud-served stand-in for an on-device Gemma edge model)"
-                        if is_primary
-                        else f"Fallback visual gate ({used_model})"
-                    )
-                    prov = StageProvenance(
-                        stage="T1B_GATE",
-                        producer="MODEL" if is_primary else "FALLBACK_MODEL",
-                        model_id=used_model,
-                        attempts=attempts,
-                        latency_ms=elapsed_ms,
-                        input_simulated=input_simulated,
-                        note=note,
-                    )
-                    return (
-                        "NOMINAL" if vote_raw == "NOMINAL" else "ANOMALY",
-                        conf,
-                        obs,
-                        bbox_clean,
-                        prov,
-                    )
-                except Exception:
-                    if attempts:
-                        attempts[-1].status = "SCHEMA_INVALID"
+            if parsed is not None and used_model:
+                vote, conf, obs, bbox_clean = parsed
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                is_primary = used_model == self.settings.tier1_visual_gate_model
+                note = (
+                    f"Primary visual gate ({used_model})"
+                    if is_primary
+                    else f"Hedged backup visual gate ({used_model})"
+                )
+                prov = StageProvenance(
+                    stage="T1B_GATE",
+                    producer="MODEL" if is_primary else "FALLBACK_MODEL",
+                    model_id=used_model,
+                    attempts=attempts,
+                    latency_ms=elapsed_ms,
+                    input_simulated=input_simulated,
+                    note=note,
+                )
+                return vote, conf, obs, bbox_clean, prov
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         self.metrics.record_fallback_used("T1B_GATE")
@@ -430,9 +581,11 @@ class GoogleModelRouter:
             "- Only cite numeric parameters (torques, temperatures, ramp rates, gas flow, tolerances) that appear in the retrieved SOPs or skill references.\n"
             "- Provide at least 2 concrete evidence items citing their source."
         )
-        parts: list[Any] = [genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png")]
+        img_bytes, img_mime = _to_jpeg_bytes(raw_image_bytes)
+        parts: list[Any] = [genai_types.Part.from_bytes(data=img_bytes, mime_type=img_mime)]
         if envelope_png_bytes:
-            parts.append(genai_types.Part.from_bytes(data=envelope_png_bytes, mime_type="image/png"))
+            env_bytes, env_mime = _to_jpeg_bytes(envelope_png_bytes)
+            parts.append(genai_types.Part.from_bytes(data=env_bytes, mime_type=env_mime))
         parts.append(prompt)
         return parts
 
@@ -542,18 +695,22 @@ class GoogleModelRouter:
                 active_skill=active_skill,
                 language=language,
             )
-            cfg = genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=Tier2ModelOutput,
-                temperature=0.15,
-            )
+            t2_cfg_kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "response_schema": Tier2ModelOutput,
+                "temperature": 0.15,
+                "max_output_tokens": 900,
+            }
+            if hasattr(genai_types, "ThinkingConfig"):
+                t2_cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            cfg = genai_types.GenerateContentConfig(**t2_cfg_kwargs)
             parsed, used_model, attempts = await self._run_hedged_tier2(
                 contents=contents,
                 config=cfg,
                 primary_model=self.settings.tier2_primary_model,
                 runner_up_model=self.settings.tier2_fallback_model,
                 hedge_delay_sec=self.settings.tier2_hedge_delay_sec,
-                timeout_sec=12.0,
+                timeout_sec=20.0,
             )
             if parsed is not None and used_model is not None:
                 matched_sop_id = (
@@ -637,7 +794,7 @@ class GoogleModelRouter:
         elif any(f.startswith("REFLOW_") for f in t1a_flags):
             defect_type = "SOLDER_BRIDGE"
 
-        econ = calculate_avoidable_loss(line=line, defect_type=defect_type, severity="MEDIUM")
+        # No AI diagnosis -> no money figure. Economics only runs on a model diagnosis.
         steps = [
             "Quarantine part and notify shift Quality Engineer.",
             f"Follow retrieved SOP {sop_id} before adjusting machine parameters.",
@@ -669,8 +826,9 @@ class GoogleModelRouter:
             safety_precautions=safety,
             safety_precautions_checked=[{"text": s, "unverified": False, "unverified_values": []} for s in safety],
             unverified_value_count=0,
-            estimated_avoidable_loss_inr=econ["avoidable_loss_inr"],
-            estimated_downtime_prevented_mins=econ["downtime_prevented_mins"],
+            estimated_avoidable_loss_inr=0,
+            estimated_downtime_prevented_mins=0,
+            economics_basis=ECONOMICS_NOT_ESTIMATED,
         )
         prov = StageProvenance(
             stage="T2_DIAGNOSIS",
@@ -694,7 +852,7 @@ class GoogleModelRouter:
         attempts: list[ModelAttempt] = []
         lang_name = {"en-IN": "English", "hi-IN": "Hindi", "mr-IN": "Marathi"}.get(request.language, "English")
         prompt = (
-            f"Answer in {lang_name}, max 3 short sentences, cite SOP {matched_sop.id}, "
+            f"Answer in {lang_name}, max 2 very short sentences (~20 words), cite SOP {matched_sop.id}, "
             "and ONLY use numeric values that appear in the SOP below.\n"
             f"SOP [{matched_sop.id}] ({matched_sop.title}): {matched_sop.sop_markdown}\n"
             f"Spec: {matched_sop.torque_spec}\n"
@@ -710,7 +868,7 @@ class GoogleModelRouter:
                     response_modalities=["AUDIO"],
                     output_audio_transcription=genai_types.AudioTranscriptionConfig(),
                 )
-                async with asyncio.timeout(15.0):
+                async with asyncio.timeout(22.0):
                     async with self._client.aio.live.connect(
                         model=self.settings.tier4_live_copilot_model,
                         config=live_cfg,
@@ -786,13 +944,25 @@ class GoogleModelRouter:
                 self.metrics.record_attempt(self.settings.tier4_live_copilot_model, status, live_ms)
                 _log_attempt_json("T4_COPILOT", att)
 
-            # Text fallback
-            resp, used_model, fb_attempts = await self._call_genai_with_retry(
+            # Text fallback: staggered hedge across the text models (first answer wins)
+            text_models = [
+                m for m in (self.settings.tier4_fallback_model, self.settings.tier4_second_fallback_model) if m
+            ]
+            t4_fb_kwargs: dict[str, Any] = {"temperature": 0.15, "max_output_tokens": 220}
+            if hasattr(genai_types, "ThinkingConfig"):
+                t4_fb_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            t4_fb_cfg = genai_types.GenerateContentConfig(**t4_fb_kwargs)
+            resp, used_model, fb_attempts = await self._run_staggered_hedge(
                 stage="T4_COPILOT",
-                model_candidates=[self.settings.tier4_fallback_model],
+                candidates=list(dict.fromkeys(text_models)),
                 contents=prompt,
-                timeout_sec=8.0,
+                config=t4_fb_cfg,
+                parse_fn=lambda text: _NonEmptyText(text),
+                stagger_sec=3.0,
+                total_timeout_sec=12.0,
             )
+            if resp is not None:
+                resp = SimpleNamespace(text=resp.text)
             attempts.extend(fb_attempts)
             if resp and used_model and getattr(resp, "text", None):
                 ans = resp.text.strip()

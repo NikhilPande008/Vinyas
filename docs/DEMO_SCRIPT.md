@@ -17,6 +17,6 @@
 - **1:55–2:15 | Human Disposition → Multilingual Work Order**
   Record a human disposition (`HOLD`, role `QE`) — note that the work-order form is locked until a human decides. Enter a Hindi maintenance note (`तुरंत स्पिंडल रोकें, SP-7014C-P4S बदलना है`) and click **Log work order**; show Gemini extracting `part_code`, `shift_priority`, `required_spares`, and `SLA RISK`.
 - **2:15–2:40 | 10-Part Batch Line Run (Measured Token Accounting)**
-  In **Engineer View**, click **Run 10-part batch**. Show real measured counts: parts inspected, escalated, gated tokens vs estimated cloud-only tokens, and measured token saving %.
+  In **Engineer View**, click **Run 10-part batch**. Show real measured counts: parts inspected, escalated, gated tokens vs estimated cloud-only tokens, and the gate's token effect. Say plainly that the effect is negative when most parts escalate (for example when the free-tier visual gate is unavailable), and that it only becomes a saving when the gate clears most healthy parts.
 - **2:40–3:00 | Measured Eval, Limitations & Close**
   Briefly flash `eval/RESULTS.md` (with its simulated-data header) and state honest limitations (simulated inputs, demo SQLite store, plant validation next).

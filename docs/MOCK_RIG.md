@@ -31,12 +31,19 @@ Ground-truth labels live **exclusively** in `data/mock_rig/manifest.json`. The i
 - `IMBALANCE`: elevated `1×` shaft harmonic (`~90 Hz`) pushing RMS velocity into ISO 20816-3 Zone C without BPFO periodicity.
 - `vibration_rms_mms` is computed directly from the `10–1,000 Hz` Butterworth-bandpassed signal.
 
+### DSP Gate Calibration (`backend/dsp/envelope.py`)
+- Escalating rule: `BEARING_PERIODIC_IMPACT` when the envelope peak within `±3%` of the computed BPFO has SNR `≥ 14 dB` **and** the `2× BPFO` peak has SNR `≥ 11 dB`, both against the median envelope spectrum in `50–2,000 Hz`.
+- Why not a lower threshold: on the 13 nominal and wrench-strike CNC samples, noise alone produces a BPFO-band peak of `5.4–10.5 dB`, so a `6 dB` rule would escalate healthy spindles. The 7 fault samples sit at `38–42 dB`.
+- `TRANSIENT_IMPACT` (kurtosis `≥ 8` without a BPFO flag) is informational only; wrench strikes measure kurtosis `~300` and are not escalated by the DSP gate.
+- Reproduce: `python scripts/calibrate_dsp_gate.py` (writes `eval/dsp_gate_calibration.md`). These margins are wide because the synthetic fault is strong; real spindle data will separate less cleanly.
+
 ### Process Telemetry (`backend/mock_rig/process.py`)
 - **PCB (SAC305 reflow):** nominal window `1.0–3.0 °C/s` preheat ramp, `235–250 °C` peak, `45–90 s` Time Above Liquidus (TAL). Roughly `30%` of defective PCB samples keep nominal reflow telemetry so optical inspection remains necessary.
 - **MIG Weld (82% Ar / 18% CO2):** nominal shielding gas `15–20 L/min`, arc voltage `20–24 V`, wire feed `7.5–9.5 m/min`. `POROSITY_GAS_LOSS` drops gas flow to `5.2–10.8 L/min`; `SPATTER_COSMETIC` maintains nominal gas flow.
 
 ### Procedural Images (`backend/mock_rig/images.py`)
 - Resolution: `768 × 512` PNG, with directional illumination gradient and Gaussian sensor noise. **Zero text** is rendered on any frame.
-- **PCB:** 4-sided 64-lead QFP package with pads, copper traces, vias, and shape-only silkscreen. Bridges span 2–3 leads at a random side/pin; flux glare is a translucent patch off the leads.
+- **PCB:** 4-sided 64-lead QFP package with pads, copper traces, vias, and shape-only silkscreen. Bridges are an irregular, shiny grey solder mass joining 3 adjacent lead feet at the pads, on a random side/pin; flux glare is a translucent patch off the leads.
+  - *Change log (2026-11-20):* bridges were first drawn as a flat white rounded box across the middle of the leads, the same colour as the leads. It did not look like solder, and all three visual-gate models called it NOMINAL in a spot check. They were redrawn as solder at the lead feet (labels, seeds and telemetry unchanged; only the 4 bridge frames and their boxes changed) before `eval/visual_gate_benchmark.md` was run.
 - **WELD:** brushed steel plates with rippled weld bead; porosity clusters dark pits on the bead; cosmetic spatter places droplets beside the bead.
 - **CNC:** machined metallic bore/flange surface with turning marks. Because the rolling bearing sits inside the assembled spindle housing, the camera frame shows no bearing defect; CNC detection is vibration-led.

@@ -36,6 +36,9 @@ DOWNTIME_PREVENTED_MINS_BY_SEVERITY: dict[str, int] = {
 
 _NOMINAL_DEFECT_TYPES = {"NO_DEFECT_FOUND", "NOMINAL", "HEALTHY", "NONE", ""}
 
+# Used when no AI diagnosis exists (rule-based hold): no money figure is shown at all.
+ECONOMICS_NOT_ESTIMATED = "Not estimated: no AI diagnosis (rule-based hold)"
+
 
 def calculate_avoidable_loss(
     line: str,

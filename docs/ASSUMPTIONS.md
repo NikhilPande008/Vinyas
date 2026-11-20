@@ -31,9 +31,10 @@ Every constant used in the Vinyas codebase is listed here with either a verified
 
 **Formula:** `avoidable_loss_inr = (unit_cost_inr × batch_exposure_units) + int((hourly_downtime_inr / 60) × downtime_prevented_mins)`.
 
-## 3. Token Savings Accounting
-- Token savings are **never hard-coded**. They are computed per batch in `scripts/eval_pipeline.py` and `POST /api/line-run` from actual `usage_metadata`:
-  - `gated_tokens = Σ(T1-B tokens over all N parts) + Σ(T2 tokens over escalated parts)`
-  - `cloud_only_tokens = N × mean(T2 tokens per escalated part)`
-  - `saving_pct = 100 × (1 − gated_tokens / cloud_only_tokens)`
-- Real-world savings depend directly on the plant's actual defect/escalation rate.
+## 3. Token Accounting for the Tier-1 Gate
+- Token figures are **never hard-coded**. They are computed per batch in `scripts/eval_pipeline.py` and `POST /api/line-run` by `backend/services/metrics.py:compute_gate_token_accounting`, from actual `usage_metadata`:
+  - `gated_tokens = Σ(T1 tokens over all N parts) + n_escalated × mean(T2 tokens per successful call)`
+  - `cloud_only_tokens = N × mean(T2 tokens per successful call)`
+  - `token_effect_pct = 100 × (1 − gated_tokens / cloud_only_tokens)`
+- A failed Tier-2 call spends almost no tokens. Every escalated part is therefore charged the mean measured Tier-2 cost, so API outages can never show up as a saving.
+- The result is **negative** when the gate escalates most parts (the gate's own tokens are pure overhead then). It turns positive only when the gate clears a meaningful share of parts, so the real effect depends on the plant's defect rate and on the visual gate being available.

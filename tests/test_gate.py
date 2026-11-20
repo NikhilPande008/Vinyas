@@ -35,8 +35,8 @@ def test_cnc_outer_race_fault_triggers_bpfo_flag_and_escalates():
         rms_velocity_mms=vib.rms_velocity_mms,
     )
     assert "BEARING_PERIODIC_IMPACT" in escalating
-    assert features["bpfo_snr_db"] >= 6.0
-    assert features["bpfo_2x_snr_db"] >= 3.0
+    assert features["bpfo_snr_db"] >= 14.0
+    assert features["bpfo_2x_snr_db"] >= 11.0
     assert len(png_bytes) > 500
 
 
