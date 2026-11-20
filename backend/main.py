@@ -19,8 +19,9 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +39,7 @@ from backend.schemas import (
     WorkOrderRecord,
 )
 from backend.services.model_router import GoogleModelRouter
+from backend.services.rate_limiter import TokenBucketRateLimiter
 from backend.services.simulator_assets import (
     ASSETS_DIR,
     SCENARIO_DEFINITIONS,
@@ -51,6 +53,17 @@ from backend.services.skill_loader import get_skill_loader
 alloydb_service = AlloyDBService()
 model_router = GoogleModelRouter()
 skill_loader = get_skill_loader()
+rate_limiter = TokenBucketRateLimiter(capacity=30, window_seconds=600)
+
+
+def _allowed_asset_filenames() -> set[str]:
+    allowed: set[str] = set()
+    for meta in SCENARIO_DEFINITIONS.values():
+        if meta.get("image_filename"):
+            allowed.add(Path(str(meta["image_filename"])).name)
+        if meta.get("audio_filename"):
+            allowed.add(Path(str(meta["audio_filename"])).name)
+    return allowed
 
 
 @asynccontextmanager
@@ -67,12 +80,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# SPA is served same-origin on Cloud Run; allow only explicit local Vite dev origins without credentials.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Eval-Token"],
 )
 
 
@@ -156,19 +175,29 @@ async def list_skills() -> dict[str, Any]:
 
 @app.get("/api/assets/{filename}")
 async def serve_simulator_asset(filename: str):
-    """Serve scenario preview PNGs and Line B 48 kHz WAV audio."""
+    """Serve allow-listed simulator PNGs and WAV audio."""
     ensure_simulator_assets()
-    safe_name = Path(filename).name
-    target = ASSETS_DIR / safe_name
-    if not target.exists():
-        raise HTTPException(status_code=404, detail=f"Asset {safe_name} not found")
+    decoded = unquote(filename)
+    if ".." in decoded or "/" in decoded or "\\" in decoded:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    safe_name = Path(decoded).name
+    if safe_name not in _allowed_asset_filenames():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    assets_root = ASSETS_DIR.resolve()
+    target = (assets_root / safe_name).resolve()
+    if not target.is_relative_to(assets_root) or not target.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
     media_type = "audio/wav" if safe_name.endswith(".wav") else "image/png"
     return FileResponse(target, media_type=media_type)
 
 
 @app.post("/api/inspect", response_model=InspectionResponse)
-async def run_edge_to_cloud_inspection(request: InspectionRequest) -> InspectionResponse:
+async def run_edge_to_cloud_inspection(
+    request: InspectionRequest,
+    http_request: Request,
+) -> InspectionResponse:
     """Execute the 5-stage Edge-to-Cloud inspection pipeline."""
+    rate_limiter.check_request(http_request, cost=1)
     t_start = time.perf_counter()
     scenario_meta = SCENARIO_DEFINITIONS.get(request.scenario_key, SCENARIO_DEFINITIONS["LINE_A_PCB"])
 
@@ -359,8 +388,12 @@ async def list_work_orders() -> dict[str, Any]:
 
 
 @app.post("/api/copilot/chat", response_model=CopilotChatResponse)
-async def copilot_chat(request: CopilotChatRequest) -> CopilotChatResponse:
+async def copilot_chat(
+    request: CopilotChatRequest,
+    http_request: Request,
+) -> CopilotChatResponse:
     """REST endpoint for the Tier-4 Hands-Free Floor Technician Co-Pilot."""
+    rate_limiter.check_request(http_request, cost=1)
     sops, _ = await alloydb_service.search_sops_scann(
         query_text=f"{request.scenario_key} {request.question}",
         scenario_key=request.scenario_key,
@@ -407,16 +440,22 @@ if (FRONTEND_DIST / "assets").exists():
 
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    """Serve static files from `/frontend/dist` or fall back to `index.html` for SPA routing."""
-    if full_path.startswith("api/") or full_path == "health":
+    """Serve static files strictly inside `/frontend/dist` or fall back to `index.html`."""
+    decoded = unquote(unquote(full_path))
+    if ".." in decoded or "\\" in decoded or decoded.startswith("/"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if decoded.startswith("api/") or decoded == "api" or decoded == "health":
         raise HTTPException(status_code=404, detail="API route not found")
 
     if FRONTEND_DIST.exists():
-        candidate = FRONTEND_DIST / full_path
-        if full_path and candidate.exists() and candidate.is_file():
-            return FileResponse(candidate)
-        index_html = FRONTEND_DIST / "index.html"
-        if index_html.exists():
+        dist_root = FRONTEND_DIST.resolve()
+        if decoded:
+            candidate = (dist_root / decoded).resolve()
+            if candidate.is_relative_to(dist_root) and candidate.is_file():
+                return FileResponse(candidate)
+        index_html = dist_root / "index.html"
+        if index_html.is_file():
             return FileResponse(index_html)
 
     return JSONResponse(
