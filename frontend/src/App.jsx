@@ -1,1139 +1,1463 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
-  Bot,
-  Camera,
+  AlertTriangle,
+  AudioLines,
+  BarChart3,
   CheckCircle2,
+  ClipboardList,
   Cpu,
-  Database,
+  Eye,
   FileCheck2,
-  Flame,
   Gauge,
-  Layers,
   Mic,
   MicOff,
   Play,
   RefreshCw,
   Send,
-  ShieldCheck,
-  Sparkles,
+  ShieldAlert,
+  Shuffle,
   Upload,
   Volume2,
-  Wrench,
   X,
-  Zap,
 } from 'lucide-react';
+import { I18N } from './i18n';
 
-const QUICK_COPILOT_CHIPS = [
-  'What is the calibrated torque spec & locknut procedure?',
-  'Which spare part SKU is needed and what is the SLA priority?',
-  'Walk me through LOTO safety & step-by-step defect rework.',
+const LINE_OPTIONS = [
+  { id: 'PCB', short: 'Line A — PCB SMT', machine: 'SMT-REFLOW-CHAKAN-A1' },
+  { id: 'CNC', short: 'Line B — CNC Spindle', machine: 'CNC-SPINDLE-CHAKAN-B2' },
+  { id: 'WELD', short: 'Line C — MIG Weld', machine: 'MIG-ARC-BHOSARI-C3' },
 ];
 
+const fmtMs = (val) => (typeof val === 'number' && !Number.isNaN(val) ? `${val} ms` : '—');
+
 export default function App() {
-  const [health, setHealth] = useState(null);
-  const [scenarios, setScenarios] = useState([]);
-  const [selectedKey, setSelectedKey] = useState('LINE_A_PCB');
-  const [inspecting, setInspecting] = useState(false);
-  const [activeStage, setActiveStage] = useState(0);
-  const [inspectionResult, setInspectionResult] = useState(null);
+  const [viewMode, setViewMode] = useState(() =>
+    typeof window !== 'undefined' && window.innerWidth < 1024 ? 'operator' : 'engineer'
+  );
+  const [language, setLanguage] = useState('en-IN');
+  const t = I18N[language] || I18N['en-IN'];
 
-  // Override / Webcam / File upload
-  const [overrideEnabled, setOverrideEnabled] = useState(false);
-  const [customImageBase64, setCustomImageBase64] = useState(null);
-  const [webcamActive, setWebcamActive] = useState(false);
-  const videoRef = useRef(null);
+  const [selectedLine, setSelectedLine] = useState('CNC');
+  const [drawnPart, setDrawnPart] = useState(null);
+  const [uploadedPreview, setUploadedPreview] = useState(null);
+  const [uploadTelemetryPreset, setUploadTelemetryPreset] = useState('nominal');
 
-  // Work orders & operator notes
-  const [operatorNotes, setOperatorNotes] = useState('');
-  const [loggingWorkOrder, setLoggingWorkOrder] = useState(false);
-  const [workOrderLedger, setWorkOrderLedger] = useState({
-    storage_mode: 'LOCAL_SQLITE_FALLBACK',
-    db_ai_mode: 'PYTHON_FALLBACK',
-    total_work_orders: 0,
-    critical_sla_count: 0,
-    total_scrap_saved_inr: 0,
-    work_orders: [],
-  });
-  const [woBanner, setWoBanner] = useState(null);
+  const [inspection, setInspection] = useState(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [isInspecting, setIsInspecting] = useState(false);
+  const [inspectError, setInspectError] = useState('');
 
-  // Gemini Live Technician Co-Pilot
-  const [copilotQuery, setCopilotQuery] = useState('');
-  const [copilotLoading, setCopilotLoading] = useState(false);
-  const [micListening, setMicListening] = useState(false);
-  const [copilotMessages, setCopilotMessages] = useState([
-    {
-      role: 'assistant',
-      text: 'Vinyas Gemini 3.8 Live Floor Co-Pilot ready. Select any shop-floor prompt chip or tap the voice mic to query AlloyDB ScaNN SOP tolerances and torque specs hands-free.',
-      model: 'gemini-3.8-live',
-      sopId: 'SOP-PUNE-PCB-01',
-    },
-  ]);
+  // Blind reveal & session tally
+  const [revealed, setRevealed] = useState(null);
+  const [sessionStats, setSessionStats] = useState({ correct: 0, total: 0 });
+  const scoredSamplesRef = useRef(new Set());
 
-  // Architecture & AI Stack Modal
-  const [archModalOpen, setArchModalOpen] = useState(false);
+  // Human disposition + Work Order
+  const [dispRole, setDispRole] = useState('QE');
+  const [dispNote, setDispNote] = useState('');
+  const [disposition, setDisposition] = useState(null);
+  const [isSavingDisp, setIsSavingDisp] = useState(false);
 
-  const selectedScenario =
-    scenarios.find((s) => s.scenario_key === selectedKey) || scenarios[0] || null;
+  const [woNotes, setWoNotes] = useState('');
+  const [isLoggingWo, setIsLoggingWo] = useState(false);
+  const [woError, setWoError] = useState('');
+  const [workOrders, setWorkOrders] = useState([]);
+  const [totalAvoidableLoss, setTotalAvoidableLoss] = useState(0);
 
-  const fetchAllTelemetry = async () => {
+  // Co-pilot (WebSocket primary -> REST fallback)
+  const [copilotInput, setCopilotInput] = useState('');
+  const [copilotMessages, setCopilotMessages] = useState([]);
+  const [copilotTransport, setCopilotTransport] = useState('ws');
+  const [isCopilotBusy, setIsCopilotBusy] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceMessage, setVoiceMessage] = useState('');
+  const wsRef = useRef(null);
+
+  // Line Run batch & Metrics modal
+  const [lineRunResult, setLineRunResult] = useState(null);
+  const [isRunningBatch, setIsRunningBatch] = useState(false);
+  const [metricsModalOpen, setMetricsModalOpen] = useState(false);
+  const [metricsData, setMetricsData] = useState(null);
+
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
+
+  const fetchWorkOrders = async () => {
     try {
-      const [hRes, sRes, wRes] = await Promise.all([
-        fetch('/health'),
-        fetch('/api/scenarios'),
-        fetch('/api/work-orders'),
-      ]);
-      if (hRes.ok) setHealth(await hRes.json());
-      if (sRes.ok) {
-        const sData = await sRes.json();
-        setScenarios(sData.scenarios || []);
-        const found = (sData.scenarios || []).find((x) => x.scenario_key === selectedKey);
-        if (found && !operatorNotes) {
-          setOperatorNotes(found.default_operator_note || '');
-        }
+      const res = await fetch('/api/work-orders');
+      if (res.ok) {
+        const data = await res.json();
+        setWorkOrders(data.work_orders || []);
+        setTotalAvoidableLoss(data.total_avoidable_loss_inr || 0);
       }
-      if (wRes.ok) setWorkOrderLedger(await wRes.json());
-    } catch (err) {
-      console.error('Telemetry load error:', err);
+    } catch {
+      // ignore transient startup errors
+    }
+  };
+
+  const fetchMetrics = async () => {
+    try {
+      const res = await fetch('/api/metrics');
+      if (res.ok) {
+        setMetricsData(await res.json());
+      }
+    } catch {
+      // ignore
     }
   };
 
   useEffect(() => {
-    fetchAllTelemetry();
+    fetchWorkOrders();
+    fetchMetrics();
   }, []);
 
-  const handleSelectScenario = (scenario) => {
-    setSelectedKey(scenario.scenario_key);
-    setOperatorNotes(scenario.default_operator_note || '');
-    setWoBanner(null);
+  // Draw random simulated part (no auto-inspection on load)
+  const handleDrawRandom = async (lineOverride) => {
+    const line = lineOverride || selectedLine;
+    setSelectedLine(line);
+    setIsDrawing(true);
+    setInspectError('');
+    setUploadedPreview(null);
+    setInspection(null);
+    setRevealed(null);
+    setDisposition(null);
+    setWoError('');
+    try {
+      const res = await fetch('/api/rig/draw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDrawnPart(data);
+    } catch (err) {
+      setInspectError(`Could not draw simulated part: ${err.message}`);
+    } finally {
+      setIsDrawing(false);
+    }
   };
 
-  const handleRunInspection = async (keyToRun = selectedKey) => {
-    setInspecting(true);
-    setWoBanner(null);
-    setActiveStage(1);
+  const buildUploadTelemetry = (line, preset) => {
+    if (preset === 'anomalous') {
+      if (line === 'CNC') {
+        return { vibration_khz: 0.793, vibration_rms_mms: 5.1, temperature_c: 62.0, line_speed_rpm: 5400 };
+      }
+      if (line === 'WELD') {
+        return { vibration_khz: 0.9, vibration_rms_mms: 1.6, temperature_c: 320.0, line_speed_rpm: 1850, shielding_gas_lpm: 7.5, arc_voltage_v: 26.0, wire_feed_m_per_min: 8.4 };
+      }
+      return { vibration_khz: 0.4, vibration_rms_mms: 0.8, temperature_c: 254.0, line_speed_rpm: 1200, reflow_ramp_c_per_s: 3.6, reflow_peak_c: 254.0, reflow_tal_s: 72.0 };
+    }
+    if (line === 'CNC') {
+      return { vibration_khz: 0.09, vibration_rms_mms: 0.9, temperature_c: 41.0, line_speed_rpm: 5400 };
+    }
+    if (line === 'WELD') {
+      return { vibration_khz: 0.8, vibration_rms_mms: 1.3, temperature_c: 270.0, line_speed_rpm: 1850, shielding_gas_lpm: 17.0, arc_voltage_v: 22.0, wire_feed_m_per_min: 8.5 };
+    }
+    return { vibration_khz: 0.35, vibration_rms_mms: 0.7, temperature_c: 242.0, line_speed_rpm: 1200, reflow_ramp_c_per_s: 2.0, reflow_peak_c: 242.0, reflow_tal_s: 65.0 };
+  };
 
-    const stageTimer1 = setTimeout(() => setActiveStage(2), 180);
-    const stageTimer2 = setTimeout(() => setActiveStage(3), 380);
-    const stageTimer3 = setTimeout(() => setActiveStage(4), 600);
-
+  const handleInspect = async () => {
+    setIsInspecting(true);
+    setInspectError('');
+    setRevealed(null);
+    setDisposition(null);
+    setWoError('');
     try {
-      const targetScenario = scenarios.find((s) => s.scenario_key === keyToRun);
+      let body;
+      if (uploadedPreview) {
+        body = {
+          line: selectedLine,
+          custom_image_base64: uploadedPreview,
+          sensor_telemetry: buildUploadTelemetry(selectedLine, uploadTelemetryPreset),
+          language,
+        };
+      } else if (drawnPart) {
+        body = { sample_id: drawnPart.sample_id, language };
+      } else {
+        body = { line: selectedLine, language };
+      }
       const res = await fetch('/api/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scenario_key: keyToRun,
-          custom_image_base64: overrideEnabled ? customImageBase64 : null,
-          sensor_telemetry: targetScenario ? targetScenario.sensor_telemetry : undefined,
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
-      setInspectionResult(data);
-      if (data.tier1_triage?.pass_status === 'HEALTHY') {
-        setActiveStage(1);
-      } else {
-        setActiveStage(4);
-      }
-      const hRes = await fetch('/health');
-      if (hRes.ok) setHealth(await hRes.json());
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setInspection(data);
+      fetchMetrics();
     } catch (err) {
-      console.error('Inspection failed:', err);
+      setInspectError(err.message || 'Inspection failed');
     } finally {
-      clearTimeout(stageTimer1);
-      clearTimeout(stageTimer2);
-      clearTimeout(stageTimer3);
-      setInspecting(false);
+      setIsInspecting(false);
     }
   };
 
-  useEffect(() => {
-    if (scenarios.length > 0 && !inspectionResult && !inspecting) {
-      handleRunInspection('LINE_A_PCB');
-    }
-  }, [scenarios]);
-
-  const handleApproveWorkOrder = async () => {
-    if (!operatorNotes.trim()) return;
-    setLoggingWorkOrder(true);
-    setWoBanner(null);
+  const handleRevealTruth = async () => {
+    const sid = inspection?.sample_id || drawnPart?.sample_id;
+    if (!sid) return;
     try {
-      const diag = inspectionResult?.tier2_diagnosis;
-      const payload = {
-        incident_id: diag?.incident_id || `INC-${selectedKey}-MANUAL`,
-        machine_id: selectedScenario?.machine_id || 'PUNE-CHAKAN-CELL-01',
-        operator_notes: operatorNotes,
-        scenario_key: selectedKey,
-        scrap_saved_inr: diag?.estimated_scrap_saved_inr ?? 34600,
-      };
-      const res = await fetch('/api/work-orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        setActiveStage(5);
-        setWoBanner(created);
-        const wRes = await fetch('/api/work-orders');
-        if (wRes.ok) setWorkOrderLedger(await wRes.json());
+      const res = await fetch(`/api/rig/reveal/${sid}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setRevealed(data);
+      if (inspection && !scoredSamplesRef.current.has(sid)) {
+        scoredSamplesRef.current.add(sid);
+        const sysEscalated = inspection.tier1_triage?.pass_status === 'ESCALATE';
+        const isCorrect = Boolean(data.is_defect) === Boolean(sysEscalated);
+        setSessionStats((prev) => ({
+          correct: prev.correct + (isCorrect ? 1 : 0),
+          total: prev.total + 1,
+        }));
       }
     } catch (err) {
-      console.error('Work order error:', err);
-    } finally {
-      setLoggingWorkOrder(false);
+      setInspectError(err.message);
     }
   };
 
-  const handleAskCopilot = async (questionText) => {
-    const q = (questionText || copilotQuery).trim();
-    if (!q) return;
-    setCopilotQuery('');
-    setCopilotMessages((prev) => [...prev, { role: 'user', text: q }]);
-    setCopilotLoading(true);
-
-    try {
-      const diag = inspectionResult?.tier2_diagnosis;
-      const res = await fetch('/api/copilot/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: q,
-          scenario_key: selectedKey,
-          incident_id: diag?.incident_id,
-          defect_class: diag?.defect_class,
-          matched_sop_id: diag?.matched_sop_id,
-        }),
-      });
-      if (res.ok) {
-        const ans = await res.json();
-        setCopilotMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            text: ans.answer,
-            model: ans.model_used,
-            sopId: ans.grounded_sop_id,
-            latencyMs: ans.latency_ms,
-          },
-        ]);
-      }
-    } catch (err) {
-      console.error('Copilot error:', err);
-    } finally {
-      setCopilotLoading(false);
-    }
-  };
-
-  const handleToggleVoiceMic = () => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      handleAskCopilot(
-        `Voice PTT [${selectedKey}]: What is the immediate containment action and torque spec for this fault?`
-      );
-      return;
-    }
-    if (micListening) {
-      setMicListening(false);
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-IN';
-    recognition.interimResults = false;
-    setMicListening(true);
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setMicListening(false);
-      handleAskCopilot(transcript);
-    };
-    recognition.onerror = () => setMicListening(false);
-    recognition.onend = () => setMicListening(false);
-    recognition.start();
-  };
-
-  const handleFileUpload = (e) => {
+  const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      setCustomImageBase64(reader.result);
+      setUploadedPreview(String(reader.result));
+      setDrawnPart(null);
+      setInspection(null);
+      setRevealed(null);
+      setDisposition(null);
     };
     reader.readAsDataURL(file);
   };
 
-  const handleToggleWebcam = async () => {
-    if (webcamActive) {
-      const stream = videoRef.current?.srcObject;
-      if (stream) stream.getTracks().forEach((t) => t.stop());
-      setWebcamActive(false);
+  const handleRecordDisposition = async (decision) => {
+    if (!inspection?.incident_id) return;
+    setIsSavingDisp(true);
+    setWoError('');
+    try {
+      const res = await fetch(`/api/incidents/${inspection.incident_id}/disposition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, role: dispRole, note: dispNote }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setDisposition(data);
+    } catch (err) {
+      setWoError(err.message);
+    } finally {
+      setIsSavingDisp(false);
+    }
+  };
+
+  const handleLogWorkOrder = async (e) => {
+    e.preventDefault();
+    if (!inspection?.incident_id || !woNotes.trim()) return;
+    setIsLoggingWo(true);
+    setWoError('');
+    try {
+      const lineObj = LINE_OPTIONS.find((l) => l.id === inspection.line) || LINE_OPTIONS[0];
+      const res = await fetch('/api/work-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          incident_id: inspection.incident_id,
+          machine_id: lineObj.machine,
+          operator_notes: woNotes.trim(),
+          line: inspection.line,
+          avoidable_loss_inr: inspection.tier2_diagnosis?.estimated_avoidable_loss_inr || 0,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setWoNotes('');
+      await fetchWorkOrders();
+    } catch (err) {
+      setWoError(err.message);
+    } finally {
+      setIsLoggingWo(false);
+    }
+  };
+
+  const playAudioOrTts = (resp) => {
+    if (resp.audio_wav_base64) {
+      try {
+        const audio = new Audio(`data:audio/wav;base64,${resp.audio_wav_base64}`);
+        audio.play().catch(() => {});
+        return 'live-audio';
+      } catch {
+        // fallback below
+      }
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window && resp.answer) {
+      try {
+        const utter = new SpeechSynthesisUtterance(resp.answer);
+        utter.lang = language;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utter);
+        return 'device-tts';
+      } catch {
+        // ignore
+      }
+    }
+    return 'text-only';
+  };
+
+  const sendCopilotQuestion = async (questionText) => {
+    const q = (questionText || copilotInput).trim();
+    if (!q) return;
+    setCopilotInput('');
+    setIsCopilotBusy(true);
+    setCopilotMessages((prev) => [...prev, { role: 'user', text: q }]);
+
+    const payload = {
+      question: q,
+      line: inspection?.line || selectedLine,
+      incident_id: inspection?.incident_id || null,
+      matched_sop_id: inspection?.tier2_diagnosis?.matched_sop_id || null,
+      language,
+    };
+
+    const handleReply = (resp, transportUsed) => {
+      const audioMode = playAudioOrTts(resp);
+      setCopilotMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          text: resp.answer,
+          model: resp.model_used || resp.producer,
+          producer: resp.producer,
+          sop: resp.grounded_sop_id,
+          latency_ms: resp.latency_ms,
+          unverified: resp.unverified_values || [],
+          audioMode,
+          transport: transportUsed,
+        },
+      ]);
+      setIsCopilotBusy(false);
+      fetchMetrics();
+    };
+
+    // Primary transport: WebSocket /api/live-copilot; automatic labelled fallback: REST /api/copilot/chat
+    const tryRestFallback = async () => {
+      setCopilotTransport('rest-fallback');
+      try {
+        const res = await fetch('/api/copilot/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        handleReply(data, 'REST fallback');
+      } catch (err) {
+        setCopilotMessages((prev) => [
+          ...prev,
+          { role: 'assistant', text: `Co-pilot error: ${err.message}`, producer: 'FALLBACK_RULES' },
+        ]);
+        setIsCopilotBusy(false);
+      }
+    };
+
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${window.location.host}/api/live-copilot`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      const timer = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          ws.close();
+          tryRestFallback();
+        }
+      }, 3000);
+
+      ws.onopen = () => {
+        clearTimeout(timer);
+        setCopilotTransport('ws');
+        ws.send(JSON.stringify(payload));
+      };
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          handleReply(data, 'WebSocket');
+        } finally {
+          ws.close();
+        }
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        ws.close();
+        tryRestFallback();
+      };
+    } catch {
+      tryRestFallback();
+    }
+  };
+
+  const handleVoicePushToTalk = () => {
+    setVoiceMessage('');
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      setVoiceMessage(t.voiceUnsupported);
       return;
     }
+    const rec = new SpeechRec();
+    rec.lang = language;
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    setIsListening(true);
+    rec.onresult = (e) => {
+      const transcript = e.results?.[0]?.[0]?.transcript || '';
+      setIsListening(false);
+      if (transcript.trim()) {
+        sendCopilotQuestion(transcript.trim());
+      }
+    };
+    rec.onerror = () => {
+      setIsListening(false);
+      setVoiceMessage(t.voiceUnsupported);
+    };
+    rec.onend = () => setIsListening(false);
+    rec.start();
+  };
+
+  const handleLineRun = async () => {
+    setIsRunningBatch(true);
+    setLineRunResult(null);
+    setInspectError('');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      setWebcamActive(true);
-      setTimeout(() => {
-        if (videoRef.current) videoRef.current.srcObject = stream;
-      }, 100);
+      const res = await fetch('/api/line-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line: selectedLine, n: 10 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      setLineRunResult(data);
+      fetchMetrics();
     } catch (err) {
-      alert('Webcam not accessible in this browser context; please use image file upload override.');
+      setInspectError(err.message);
+    } finally {
+      setIsRunningBatch(false);
     }
   };
 
-  const handleCaptureWebcamFrame = () => {
-    if (!videoRef.current) return;
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 420;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-    setCustomImageBase64(canvas.toDataURL('image/png'));
-  };
+  const diag = inspection?.tier2_diagnosis || null;
+  const t1 = inspection?.tier1_triage || null;
+  const tel = inspection?.telemetry || null;
 
-  const isShortCircuited =
-    inspectionResult?.tier1_triage?.pass_status === 'HEALTHY';
-  const diag = inspectionResult?.tier2_diagnosis;
-  const telemetry = inspectionResult?.telemetry;
+  const verdictStyle = useMemo(() => {
+    if (!t1) return null;
+    if (t1.pass_status === 'HEALTHY') {
+      return {
+        label: t.passVerdict,
+        bg: 'bg-emerald-950/80 border-emerald-500 text-emerald-100',
+        icon: <CheckCircle2 className="w-8 h-8 text-emerald-400 shrink-0" />,
+      };
+    }
+    if (diag?.severity === 'CRITICAL') {
+      return {
+        label: t.stopVerdict,
+        bg: 'bg-rose-950/85 border-rose-500 text-rose-100',
+        icon: <ShieldAlert className="w-8 h-8 text-rose-400 shrink-0" />,
+      };
+    }
+    return {
+      label: t.holdVerdict,
+      bg: 'bg-amber-950/85 border-amber-500 text-amber-100',
+      icon: <AlertTriangle className="w-8 h-8 text-amber-400 shrink-0" />,
+    };
+  }, [t1, diag, t]);
+
+  const canLogWorkOrder =
+    disposition && ['HOLD', 'REWORK', 'SCRAP'].includes(disposition.decision);
+
+  const activeFrameUrl = inspection?.raw_image_url || drawnPart?.frame_url || uploadedPreview;
+  const activeIsSimulated = inspection ? inspection.input_simulated : Boolean(drawnPart);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* TOP TELEMETRY BAR */}
-      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-30">
-        <div className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-lg bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center text-cyan-400">
-            <Cpu className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h1 className="font-bold text-base md:text-lg tracking-tight text-white">
-                Vinyas
-              </h1>
-              <span className="text-xs md:text-sm font-medium text-slate-300">
-                Manufacturing Quality & Predictive Maintenance Platform
-              </span>
-              <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                PUNE DISCRETE MFG
-              </span>
+      {/* Header Bar */}
+      <header className="border-b border-slate-800 bg-slate-900/95 px-4 py-3 sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-sky-500/20 border border-sky-400/40 flex items-center justify-center">
+              <Cpu className="w-6 h-6 text-sky-300" />
             </div>
-            <p className="text-[11px] text-slate-400 font-mono">
-              Gemma 4 E4B Edge Gate • AlloyDB Express PostgreSQL 18 ScaNN + AI.EXTRACT() • Gemini 4 Hydrogen • Nano Banana 2.1 • Gemini 3.8 Live
-            </p>
-          </div>
-        </div>
-
-        {/* Live Health Pills & AI Stack Modal Trigger */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-xs font-mono">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-slate-400">Cloud Run:</span>
-            <span className="text-emerald-400 font-semibold">ONLINE</span>
+            <div>
+              <h1 className="text-lg font-bold tracking-tight text-white">{t.appTitle}</h1>
+              <p className="text-xs text-slate-300">{t.appSubtitle}</p>
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-xs font-mono">
-            <Database className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-slate-400">AlloyDB + ScaNN:</span>
-            <span
-              className={
-                health?.storage_mode === 'ALLOYDB_EXPRESS_SCANN'
-                  ? 'text-emerald-400 font-semibold'
-                  : 'text-amber-300 font-semibold'
-              }
-            >
-              {health?.storage_mode === 'ALLOYDB_EXPRESS_SCANN'
-                ? 'CONNECTED'
-                : 'RESILIENT_FALLBACK'}
-            </span>
-          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Session Tally */}
+            {sessionStats.total > 0 && (
+              <span className="px-3 py-1.5 rounded-full bg-indigo-950 border border-indigo-500/50 text-xs font-semibold text-indigo-200">
+                {t.sessionTally(sessionStats.correct, sessionStats.total)}
+              </span>
+            )}
 
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-xs font-mono">
-            <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-            <span className="text-slate-400">Inference:</span>
-            <span className="text-cyan-300 font-semibold">
-              {telemetry?.inference_mode || health?.inference_mode || 'LIVE_GOOGLE_AI'}
-            </span>
-          </div>
+            {/* Language Switcher */}
+            <div className="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-0.5" role="group" aria-label="Language">
+              {[
+                { code: 'en-IN', label: 'EN' },
+                { code: 'hi-IN', label: 'हिन्दी' },
+                { code: 'mr-IN', label: 'मराठी' },
+              ].map((lng) => (
+                <button
+                  key={lng.code}
+                  type="button"
+                  onClick={() => setLanguage(lng.code)}
+                  className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    language === lng.code
+                      ? 'bg-sky-500 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  {lng.label}
+                </button>
+              ))}
+            </div>
 
-          <button
-            onClick={() => setArchModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs transition shadow-sm shadow-cyan-500/20"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            AI Stack & Architecture
-          </button>
+            {/* Operator / Engineer View Toggle */}
+            <div className="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-0.5" role="group" aria-label="View mode">
+              <button
+                type="button"
+                onClick={() => setViewMode('operator')}
+                className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                  viewMode === 'operator' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                {t.operatorView}
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('engineer')}
+                className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                  viewMode === 'engineer' ? 'bg-sky-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                {t.engineerView}
+              </button>
+            </div>
+
+            {viewMode === 'engineer' && (
+              <button
+                type="button"
+                onClick={() => {
+                  fetchMetrics();
+                  setMetricsModalOpen(true);
+                }}
+                className="px-3 py-1.5 min-h-[36px] rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-100 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              >
+                <BarChart3 className="w-4 h-4 text-sky-300" />
+                Metrics
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* MAIN 3-COLUMN INDUSTRIAL CONTROL ROOM GRID */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 max-w-[1800px] w-full mx-auto">
-        {/* LEFT COLUMN (3 cols): VIRTUAL FACTORY LINE SIMULATOR */}
-        <section className="lg:col-span-3 flex flex-col gap-3 bg-slate-900/70 border border-slate-800 rounded-xl p-3.5">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-            <div className="flex items-center gap-2">
-              <Gauge className="w-4 h-4 text-cyan-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                1. Virtual Factory Line Simulator
-              </h2>
-            </div>
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-300">
-              Mocked Rig
-            </span>
-          </div>
-
-          {/* 4 Clickable Scenarios */}
-          <div className="space-y-2">
-            {scenarios.map((scen) => {
-              const active = scen.scenario_key === selectedKey;
-              const isHealthyScenario = scen.scenario_key === 'LINE_D_HEALTHY';
+      {/* Main Content */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-5 space-y-5">
+        {/* Line Selector + Blind Draw / Upload Controls */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {LINE_OPTIONS.map((lineObj) => {
+              const active = selectedLine === lineObj.id;
               return (
                 <button
-                  key={scen.scenario_key}
-                  onClick={() => handleSelectScenario(scen)}
-                  className={`w-full text-left p-2.5 rounded-lg border transition flex flex-col gap-1 ${
+                  key={lineObj.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedLine(lineObj.id);
+                    setDrawnPart(null);
+                    setInspection(null);
+                    setRevealed(null);
+                    setDisposition(null);
+                  }}
+                  className={`text-left p-4 min-h-[56px] rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                     active
-                      ? 'bg-cyan-950/50 border-cyan-400 shadow-sm shadow-cyan-500/10'
-                      : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                      ? 'border-sky-400 bg-sky-950/50 text-white'
+                      : 'border-slate-700 bg-slate-950/60 text-slate-300 hover:border-slate-500'
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">
-                      {scen.line_name}
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                        isHealthyScenario
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                      }`}
-                    >
-                      {isHealthyScenario ? 'EDGE SHORT-CIRCUIT' : 'ANOMALY'}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 line-clamp-1">
-                    {scen.subtitle}
-                  </p>
+                  <div className="text-sm font-bold">{lineObj.short}</div>
+                  <div className="text-xs text-slate-400 mt-0.5">{lineObj.machine}</div>
                 </button>
               );
             })}
           </div>
 
-          {/* Simulated Live Sensor Telemetry Cards */}
-          {selectedScenario && (
-            <div className="grid grid-cols-3 gap-2 pt-1">
-              <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
-                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1">
-                  <Activity className="w-3 h-3 text-cyan-400" /> VIBRATION
-                </div>
-                <div className="text-sm font-bold font-mono text-white mt-0.5">
-                  {selectedScenario.sensor_telemetry.vibration_khz} kHz
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  {selectedScenario.sensor_telemetry.vibration_rms_mms} mm/s RMS
-                </div>
-              </div>
-
-              <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
-                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1">
-                  <Flame className="w-3 h-3 text-amber-400" /> TEMP
-                </div>
-                <div className="text-sm font-bold font-mono text-white mt-0.5">
-                  {selectedScenario.sensor_telemetry.temperature_c} °C
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  IR Pyrometer
-                </div>
-              </div>
-
-              <div className="bg-slate-950 border border-slate-800 rounded-lg p-2">
-                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-emerald-400" /> SPEED
-                </div>
-                <div className="text-sm font-bold font-mono text-white mt-0.5">
-                  {selectedScenario.sensor_telemetry.line_speed_rpm}
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  RPM / Index
-                </div>
-              </div>
-            </div>
+          {selectedLine === 'CNC' && (
+            <p className="text-xs text-sky-200 bg-sky-950/40 border border-sky-800/60 rounded-lg px-3 py-2">
+              {t.cncNote}
+            </p>
           )}
 
-          {/* Image Preview + Playable Audio Clip Player for Line B */}
-          {selectedScenario && (
-            <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 space-y-2">
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-                <span>TELECENTRIC AOI FEED</span>
-                <span className="text-cyan-400">{selectedScenario.part_sku}</span>
-              </div>
-              <img
-                src={
-                  overrideEnabled && customImageBase64
-                    ? customImageBase64
-                    : selectedScenario.raw_image_url
-                }
-                alt={selectedScenario.line_name}
-                className="w-full h-36 object-cover rounded border border-slate-800"
-              />
-
-              {selectedScenario.has_audio && selectedScenario.audio_url && (
-                <div className="bg-slate-900 border border-cyan-500/30 rounded p-2 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[11px] font-mono text-cyan-300">
-                    <Volume2 className="w-3.5 h-3.5" />
-                    <span>48 kHz Spindle Bearing Acoustic Stream (4.21 kHz BPFO)</span>
-                  </div>
-                  <audio
-                    controls
-                    src={selectedScenario.audio_url}
-                    className="w-full h-8"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Optional Live Webcam / Upload Override Toggle */}
-          <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-2.5 space-y-2">
-            <label className="flex items-center justify-between cursor-pointer">
-              <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
-                <Camera className="w-3.5 h-3.5 text-cyan-400" />
-                Live Webcam / Upload Override
-              </span>
-              <input
-                type="checkbox"
-                checked={overrideEnabled}
-                onChange={(e) => setOverrideEnabled(e.target.checked)}
-                className="rounded border-slate-700 text-cyan-500 focus:ring-cyan-500"
-              />
-            </label>
-
-            {overrideEnabled && (
-              <div className="space-y-2 pt-1 border-t border-slate-800">
-                <div className="flex gap-2">
-                  <label className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs cursor-pointer">
-                    <Upload className="w-3.5 h-3.5 text-cyan-400" />
-                    <span>Upload Image</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleToggleWebcam}
-                    className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs"
-                  >
-                    <Camera className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>{webcamActive ? 'Stop Cam' : 'Start Cam'}</span>
-                  </button>
-                </div>
-
-                {webcamActive && (
-                  <div className="space-y-1">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      className="w-full h-28 object-cover rounded border border-cyan-500/40"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleCaptureWebcamFrame}
-                      className="w-full py-1 rounded bg-cyan-600 text-xs font-semibold text-white"
-                    >
-                      Capture Frame
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Primary CTA Button */}
-          <button
-            onClick={() => handleRunInspection(selectedKey)}
-            disabled={inspecting}
-            className="mt-auto w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition"
-          >
-            {inspecting ? (
-              <>
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                Running Edge-to-Cloud Pipeline...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4 fill-current" />
-                Run Edge-to-Cloud Inspection
-              </>
-            )}
-          </button>
-        </section>
-
-        {/* CENTER COLUMN (5 cols): AGENTIC PIPELINE, ScaNN GROUNDING & VISUAL SOP */}
-        <section className="lg:col-span-5 flex flex-col gap-3 bg-slate-900/70 border border-slate-800 rounded-xl p-3.5">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-cyan-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                2. Agentic Pipeline, AlloyDB ScaNN & Visual SOP
-              </h2>
-            </div>
-            {telemetry && (
-              <span className="text-[11px] font-mono text-cyan-300">
-                Total Latency: {telemetry.total_ms} ms
-              </span>
-            )}
-          </div>
-
-          {/* Live 5-Stage Stepper */}
-          <div className="grid grid-cols-5 gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-2">
-            {[
-              {
-                step: 1,
-                title: '1. Edge Gate',
-                sub: 'Gemma 4 / Emulator',
-                ms: telemetry?.tier1_ms,
-              },
-              {
-                step: 2,
-                title: '2. Skill + ScaNN',
-                sub: 'AlloyDB Vector RAG',
-                ms: telemetry?.scann_rag_ms,
-              },
-              {
-                step: 3,
-                title: '3. Diagnosis',
-                sub: 'Gemini 4 Hydrogen',
-                ms: telemetry?.tier2_ms,
-              },
-              {
-                step: 4,
-                title: '4. Visual SOP',
-                sub: 'Nano Banana 2.1',
-                ms: telemetry?.tier3_ms,
-              },
-              {
-                step: 5,
-                title: '5. Work Order',
-                sub: 'In-DB AI.EXTRACT',
-                ms: null,
-              },
-            ].map((item) => {
-              const skippedByEdge = isShortCircuited && item.step > 1;
-              const isCompleted = !skippedByEdge && activeStage >= item.step;
-              return (
-                <div
-                  key={item.step}
-                  className={`p-1.5 rounded border text-center transition ${
-                    skippedByEdge
-                      ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-300'
-                      : isCompleted
-                      ? 'bg-cyan-950/60 border-cyan-500/60 text-white'
-                      : 'bg-slate-900/60 border-slate-800 text-slate-500'
-                  }`}
-                >
-                  <div className="text-[11px] font-bold truncate">{item.title}</div>
-                  <div className="text-[9px] font-mono truncate opacity-80">
-                    {skippedByEdge ? 'SUPPRESSED (0 Tok)' : item.sub}
-                  </div>
-                  {item.ms !== undefined && item.ms !== null && (
-                    <div className="text-[10px] font-mono text-cyan-300 mt-0.5">
-                      {item.ms} ms
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* SCENARIO 4 SHORT-CIRCUIT BANNER OR TIER-2 DIAGNOSIS SUMMARY CARD */}
-          {isShortCircuited ? (
-            <div className="bg-emerald-950/30 border-2 border-emerald-500/50 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-6 h-6 text-emerald-400" />
-                  <div>
-                    <h3 className="text-sm font-bold text-emerald-300">
-                      TIER-1 EDGE SHORT-CIRCUIT: HEALTHY BASELINE PART
-                    </h3>
-                    <p className="text-xs font-mono text-emerald-200/80">
-                      Model: {inspectionResult?.tier1_triage?.executed_model}
-                    </p>
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 rounded-md bg-emerald-500 text-slate-950 font-mono font-bold text-xs">
-                  95.4% CLOUD TOKENS SAVED
-                </span>
-              </div>
-              <p className="text-xs text-slate-200 leading-relaxed">
-                {inspectionResult?.tier1_triage?.escalation_reason}
-              </p>
-              <div className="grid grid-cols-3 gap-2 pt-1 font-mono text-xs">
-                <div className="bg-slate-950/80 border border-emerald-500/30 rounded p-2">
-                  <span className="text-slate-400 block text-[10px]">EDGE LATENCY</span>
-                  <span className="text-emerald-300 font-bold">
-                    {inspectionResult?.tier1_triage?.edge_latency_ms} ms
-                  </span>
-                </div>
-                <div className="bg-slate-950/80 border border-emerald-500/30 rounded p-2">
-                  <span className="text-slate-400 block text-[10px]">TIER-2/3 CALLS</span>
-                  <span className="text-emerald-300 font-bold">0 (Suppressed)</span>
-                </div>
-                <div className="bg-slate-950/80 border border-emerald-500/30 rounded p-2">
-                  <span className="text-slate-400 block text-[10px]">ANOMALY SCORE</span>
-                  <span className="text-emerald-300 font-bold">
-                    {inspectionResult?.tier1_triage?.anomaly_confidence}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            diag && (
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`px-2 py-0.5 rounded text-xs font-mono font-bold ${
-                        diag.severity === 'CRITICAL'
-                          ? 'bg-rose-500 text-white'
-                          : 'bg-amber-500 text-slate-950'
-                      }`}
-                    >
-                      {diag.severity}
-                    </span>
-                    <h3 className="text-xs md:text-sm font-bold text-white">
-                      {diag.defect_class}
-                    </h3>
-                  </div>
-                  <span className="px-2.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-bold">
-                    +₹{diag.estimated_scrap_saved_inr.toLocaleString('en-IN')} Scrap & Downtime Saved
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap gap-1.5 text-[11px] font-mono">
-                  <span className="px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
-                    AlloyDB ScaNN SOP: {diag.matched_sop_id} (
-                    {inspectionResult?.matched_sops?.[0]?.similarity_score ?? 0.96} sim)
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 text-purple-300">
-                    Skill Loaded: .agents/skills/{diag.skill_applied}/SKILL.md
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                    Downtime Prevented: {diag.estimated_downtime_prevented_mins} mins
-                  </span>
-                </div>
-
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  <strong className="text-slate-100">Root Cause:</strong>{' '}
-                  {diag.root_cause_analysis}
-                </p>
-
-                <div className="space-y-1 pt-1">
-                  <div className="text-[11px] font-mono uppercase text-cyan-400 font-semibold">
-                    Prescribed Repair Checklist ({diag.matched_sop_id}):
-                  </div>
-                  <ol className="space-y-1 text-xs text-slate-200 list-decimal list-inside">
-                    {diag.repair_steps.map((step, i) => (
-                      <li key={i} className="leading-snug">
-                        {step}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              </div>
-            )
-          )}
-
-          {/* Side-by-Side Frame Viewer: Raw Captured Frame vs. Nano Banana 2.1 Visual Repair Overlay */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-            <div className="bg-slate-950 border border-slate-800 rounded-lg p-2 space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] font-mono">
-                <span className="text-slate-400">RAW CAPTURED FRAME</span>
-                <span className="text-cyan-400">Tier-1 Input</span>
-              </div>
-              {inspectionResult?.raw_image_url && (
-                <img
-                  src={inspectionResult.raw_image_url}
-                  alt="Raw Captured Frame"
-                  className="w-full h-44 object-cover rounded border border-slate-800"
-                />
-              )}
-            </div>
-
-            <div className="bg-slate-950 border border-cyan-500/40 rounded-lg p-2 space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] font-mono">
-                <span className="text-cyan-300 font-semibold">
-                  NANO BANANA 2.1 VISUAL REPAIR OVERLAY
-                </span>
-                <span className="text-emerald-400">SynthID</span>
-              </div>
-              {isShortCircuited ? (
-                <div className="w-full h-44 rounded border border-emerald-500/30 bg-emerald-950/20 flex flex-col items-center justify-center p-4 text-center">
-                  <CheckCircle2 className="w-8 h-8 text-emerald-400 mb-1" />
-                  <p className="text-xs font-bold text-emerald-300">
-                    Tier-3 Visual Overlay Suppressed
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    Part passed Tier-1 Edge Gate; zero Nano Banana image generation tokens spent.
-                  </p>
-                </div>
-              ) : (
-                inspectionResult?.tier3_visual_sop_data_url && (
-                  <img
-                    src={inspectionResult.tier3_visual_sop_data_url}
-                    alt="Nano Banana 2.1 Visual Repair Overlay"
-                    className="w-full h-44 object-cover rounded border border-cyan-500/30"
-                  />
-                )
-              )}
-            </div>
-          </div>
-
-          {/* Approve & Log Work Order to AlloyDB (In-SQL AI.EXTRACT & AI.IF) */}
-          <div className="mt-auto bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <Wrench className="w-3.5 h-3.5 text-cyan-400" />
-                Stage 5: In-Database Work Order Enrichment (AlloyDB AI.EXTRACT & AI.IF)
-              </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-cyan-300">
-                {workOrderLedger.db_ai_mode}
-              </span>
-            </div>
-
-            <textarea
-              rows={2}
-              value={operatorNotes}
-              onChange={(e) => setOperatorNotes(e.target.value)}
-              placeholder="Enter floor operator notes (AlloyDB AI.EXTRACT will extract part_code, shift_priority, required_spares and AI.IF will evaluate OEM SLA risk)..."
-              className="w-full rounded-lg bg-slate-900 border border-slate-700 px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-400"
-            />
-
+          <div className="flex flex-wrap items-center gap-3">
             <button
-              onClick={handleApproveWorkOrder}
-              disabled={loggingWorkOrder}
-              className="w-full py-2.5 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition"
+              type="button"
+              onClick={() => handleDrawRandom(selectedLine)}
+              disabled={isDrawing}
+              className="px-5 py-3 min-h-[48px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm flex items-center gap-2 transition disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             >
-              <FileCheck2 className="w-4 h-4" />
-              {loggingWorkOrder
-                ? 'Executing AlloyDB AI.EXTRACT() & AI.IF()...'
-                : 'Approve & Log Work Order to AlloyDB'}
+              <Shuffle className="w-5 h-5" />
+              {t.drawRandom}
             </button>
 
-            {woBanner && (
-              <div className="p-2 rounded bg-emerald-950/50 border border-emerald-500/40 text-[11px] font-mono text-emerald-200 flex items-center justify-between">
-                <span>
-                  Logged <strong>{woBanner.id}</strong> • Part SKU:{' '}
-                  <strong>{woBanner.extracted_tags_json.part_code}</strong> • Priority:{' '}
-                  <strong>{woBanner.extracted_tags_json.shift_priority}</strong>
-                </span>
-                <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300">
-                  SLA Critical: {String(woBanner.sla_critical_flag).toUpperCase()}
-                </span>
-              </div>
+            <button
+              type="button"
+              onClick={handleInspect}
+              disabled={isInspecting || (!drawnPart && !uploadedPreview)}
+              className="px-5 py-3 min-h-[48px] rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center gap-2 transition disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+            >
+              {isInspecting ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+              {t.inspectPart}
+            </button>
+
+            {inspection?.sample_id && (
+              <button
+                type="button"
+                onClick={handleRevealTruth}
+                className="px-4 py-3 min-h-[48px] rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm flex items-center gap-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+              >
+                <Eye className="w-5 h-5" />
+                {t.revealTruth}
+              </button>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoUpload}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-3 min-h-[48px] rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-sm flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            >
+              <Upload className="w-4 h-4" />
+              {t.uploadPhoto}
+            </button>
+
+            {uploadedPreview && (
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                Telemetry preset:
+                <select
+                  value={uploadTelemetryPreset}
+                  onChange={(e) => setUploadTelemetryPreset(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-100"
+                >
+                  <option value="nominal">Nominal (default)</option>
+                  <option value="anomalous">Anomalous</option>
+                </select>
+              </label>
+            )}
+
+            {viewMode === 'engineer' && (
+              <button
+                type="button"
+                onClick={handleLineRun}
+                disabled={isRunningBatch}
+                className="ml-auto px-4 py-3 min-h-[48px] rounded-lg border border-amber-500/60 bg-amber-950/50 hover:bg-amber-900/60 text-amber-100 font-semibold text-sm flex items-center gap-2 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+              >
+                <Gauge className="w-4 h-4" />
+                {isRunningBatch ? 'Running batch...' : t.lineRunBtn}
+              </button>
             )}
           </div>
+
+          {inspectError && (
+            <div className="p-3 rounded-lg bg-rose-950/80 border border-rose-500 text-rose-100 text-sm">
+              {inspectError}
+            </div>
+          )}
         </section>
 
-        {/* RIGHT COLUMN (4 cols): GEMINI LIVE CO-PILOT & PERSISTED ALLOYDB INCIDENT LOG */}
-        <section className="lg:col-span-4 flex flex-col gap-3">
-          {/* TOP PANEL: GEMINI LIVE TECHNICIAN CO-PILOT */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-2.5">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <div className="flex items-center gap-2">
-                <Bot className="w-4 h-4 text-cyan-400" />
-                <div>
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                    3A. Gemini 3.8 Live Technician Co-Pilot
-                  </h2>
-                  <p className="text-[10px] font-mono text-slate-400">
-                    Hands-Free Voice & Quick-Chip Floor Assistant
-                  </p>
-                </div>
+        {/* Empty State on First Visit */}
+        {!drawnPart && !uploadedPreview && !inspection && (
+          <section className="rounded-xl border border-dashed border-slate-700 bg-slate-900/50 p-10 text-center space-y-4">
+            <h2 className="text-xl font-bold text-white">{t.emptyTitle}</h2>
+            <p className="text-base text-slate-300 max-w-xl mx-auto">{t.emptyDesc}</p>
+            <button
+              type="button"
+              onClick={() => handleDrawRandom(selectedLine)}
+              className="px-6 py-3.5 min-h-[52px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-base inline-flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+            >
+              <Shuffle className="w-5 h-5" />
+              {t.drawRandom}
+            </button>
+          </section>
+        )}
+
+        {/* Ground Truth Reveal Banner */}
+        {revealed && (
+          <section className="rounded-xl border border-indigo-500/60 bg-indigo-950/60 p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="text-xs font-bold uppercase tracking-wider text-indigo-300">
+                Ground Truth Revealed — {revealed.sample_id}
               </div>
+              <div className="text-base font-bold text-white">
+                {revealed.label} ({revealed.defect_type}) {revealed.severity !== 'none' ? `• severity: ${revealed.severity}` : ''}
+              </div>
+            </div>
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-900 border border-indigo-400/50 text-indigo-200">
+              {Boolean(revealed.is_defect) === (t1?.pass_status === 'ESCALATE')
+                ? '✔ Gate verdict matched ground truth'
+                : '✘ Gate verdict differed from ground truth'}
+            </span>
+          </section>
+        )}
 
-              <button
-                onClick={handleToggleVoiceMic}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-mono font-semibold transition ${
-                  micListening
-                    ? 'bg-rose-500 text-white animate-pulse'
-                    : 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/25'
-                }`}
+        {/* ==================== OPERATOR VIEW ==================== */}
+        {viewMode === 'operator' && (drawnPart || uploadedPreview || inspection) && (
+          <div className="space-y-5 text-base">
+            {/* Giant Verdict Card */}
+            {verdictStyle && (
+              <section
+                aria-live="polite"
+                className={`rounded-2xl border-2 p-6 flex items-center gap-4 ${verdictStyle.bg}`}
               >
-                {micListening ? (
-                  <>
-                    <MicOff className="w-3.5 h-3.5" /> Listening...
-                  </>
-                ) : (
-                  <>
-                    <Mic className="w-3.5 h-3.5" /> Voice PTT
-                  </>
-                )}
-              </button>
-            </div>
+                {verdictStyle.icon}
+                <div className="space-y-1">
+                  <div className="text-2xl font-extrabold tracking-tight">{verdictStyle.label}</div>
+                  <div className="text-sm opacity-90">
+                    {diag ? diag.root_cause_analysis : t1?.escalation_reason}
+                  </div>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <span className="px-2.5 py-1 rounded-full bg-slate-950/60 text-xs font-semibold">
+                      {tel?.inference_mode === 'LIVE_MODEL' ? 'AI' : 'Rules'}
+                    </span>
+                    {activeIsSimulated && (
+                      <span className="px-2.5 py-1 rounded-full bg-slate-950/60 text-xs font-semibold">
+                        {t.simulatedChip}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
 
-            <div className="flex flex-wrap gap-1.5">
-              {QUICK_COPILOT_CHIPS.map((chip, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => handleAskCopilot(chip)}
-                  className="text-left text-[11px] px-2.5 py-1 rounded-full bg-slate-950 hover:bg-cyan-950/60 border border-slate-800 hover:border-cyan-500/40 text-cyan-300 transition"
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 h-48 overflow-y-auto space-y-2">
-              {copilotMessages.map((m, idx) => (
-                <div
-                  key={idx}
-                  className={`p-2 rounded-lg text-xs leading-relaxed ${
-                    m.role === 'user'
-                      ? 'bg-cyan-950/50 border border-cyan-500/30 text-cyan-100 ml-6'
-                      : 'bg-slate-900 border border-slate-800 text-slate-200 mr-2'
-                  }`}
-                >
-                  <div className="whitespace-pre-line">{m.text}</div>
-                  {m.model && (
-                    <div className="mt-1 text-[10px] font-mono text-slate-400 flex items-center justify-between">
-                      <span>Model: {m.model}</span>
-                      {m.sopId && <span className="text-cyan-400">{m.sopId}</span>}
-                    </div>
+            {/* Frame Preview */}
+            {activeFrameUrl && (
+              <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-200">
+                    {drawnPart?.sample_id || inspection?.sample_id || 'Uploaded frame'}
+                  </span>
+                  {activeIsSimulated && (
+                    <span className="px-2.5 py-1 rounded bg-amber-950 border border-amber-500/50 text-xs font-bold text-amber-200">
+                      {t.simulatedChip}
+                    </span>
                   )}
                 </div>
-              ))}
-              {copilotLoading && (
-                <div className="text-xs font-mono text-cyan-400 animate-pulse">
-                  Gemini 3.8 Live streaming grounded SOP response...
+                <img
+                  src={inspection?.tier3_visual_sop_data_url || activeFrameUrl}
+                  alt="Inspection part frame"
+                  className="w-full max-h-80 object-contain rounded-lg bg-slate-950 border border-slate-800"
+                />
+                {inspection?.verdict_note && (
+                  <p className="text-xs text-slate-300">{inspection.verdict_note}</p>
+                )}
+              </section>
+            )}
+
+            {/* SOP Repair Steps */}
+            {diag && (
+              <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-3">
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <ClipboardList className="w-5 h-5 text-sky-400" />
+                  {t.sopSteps} ({diag.matched_sop_id})
+                </h2>
+                <ol className="list-decimal list-inside space-y-2.5 text-base text-slate-100">
+                  {(diag.repair_steps_checked?.length
+                    ? diag.repair_steps_checked
+                    : diag.repair_steps.map((s) => ({ text: s, unverified: false, unverified_values: [] }))
+                  ).map((step, idx) => (
+                    <li key={idx} className="leading-relaxed">
+                      <span>{step.text}</span>
+                      {step.unverified && (
+                        <span className="ml-2 inline-block px-2 py-0.5 rounded bg-amber-950 border border-amber-500 text-xs font-bold text-amber-200">
+                          ⚠ {t.unverifiedWarn} ({step.unverified_values.join(', ')})
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+
+            {/* Push-to-Talk Co-Pilot (Operator View) */}
+            <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Volume2 className="w-5 h-5 text-sky-400" />
+                  {t.copilotTitle}
+                </h2>
+                <button
+                  type="button"
+                  onClick={handleVoicePushToTalk}
+                  aria-label={t.pushToTalk}
+                  className={`min-h-[64px] min-w-[64px] px-5 rounded-full font-bold text-base flex items-center gap-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
+                    isListening
+                      ? 'bg-rose-500 text-white animate-pulse'
+                      : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+                  }`}
+                >
+                  {isListening ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                  {isListening ? t.listening : t.pushToTalk}
+                </button>
+              </div>
+              {voiceMessage && <p className="text-sm text-amber-300">{voiceMessage}</p>}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  sendCopilotQuestion();
+                }}
+                className="flex gap-2"
+              >
+                <input
+                  type="text"
+                  value={copilotInput}
+                  onChange={(e) => setCopilotInput(e.target.value)}
+                  placeholder={t.askPlaceholder}
+                  className="flex-1 min-h-[48px] px-4 rounded-lg bg-slate-950 border border-slate-700 text-base text-white"
+                />
+                <button
+                  type="submit"
+                  disabled={isCopilotBusy}
+                  aria-label={t.send}
+                  className="px-5 min-h-[48px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              </form>
+              {copilotMessages.slice(-2).map((m, i) => (
+                <div
+                  key={i}
+                  className={`p-3 rounded-lg text-base ${
+                    m.role === 'user' ? 'bg-slate-800 text-slate-100' : 'bg-sky-950/60 border border-sky-700/60 text-sky-100'
+                  }`}
+                >
+                  {m.text}
                 </div>
+              ))}
+            </section>
+          </div>
+        )}
+
+        {/* ==================== ENGINEER VIEW (3-COLUMN) ==================== */}
+        {viewMode === 'engineer' && (drawnPart || uploadedPreview || inspection) && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* Column 1: Simulated Frame, Signal, Envelope Spectrum & Gate Votes */}
+            <div className="lg:col-span-4 space-y-4">
+              <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-sm font-bold text-white">1. Input Frame &amp; Telemetry</h2>
+                  {activeIsSimulated ? (
+                    <span className="px-2.5 py-0.5 rounded bg-amber-950 border border-amber-500/60 text-xs font-bold text-amber-200">
+                      {t.simulatedChip}
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-0.5 rounded bg-sky-950 border border-sky-500/60 text-xs font-bold text-sky-200">
+                      USER UPLOAD
+                    </span>
+                  )}
+                </div>
+
+                {activeFrameUrl && (
+                  <img
+                    src={activeFrameUrl}
+                    alt="Raw inspection frame"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950"
+                  />
+                )}
+
+                {inspection?.verdict_note && (
+                  <p className="text-xs text-sky-200 bg-sky-950/40 p-2 rounded border border-sky-800/50">
+                    {inspection.verdict_note}
+                  </p>
+                )}
+
+                {(inspection?.audio_url || drawnPart?.wav_url) && (
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                      <AudioLines className="w-4 h-4 text-sky-400" />
+                      48 kHz Vibration Signal (Simulated)
+                    </div>
+                    <audio
+                      controls
+                      src={inspection?.audio_url || drawnPart?.wav_url}
+                      className="w-full h-9"
+                    />
+                  </div>
+                )}
+
+                {inspection?.envelope_spectrum_data_url && (
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-slate-300">
+                      Tier-1A Hilbert Envelope Spectrum (2–8 kHz bandpass)
+                    </div>
+                    <img
+                      src={inspection.envelope_spectrum_data_url}
+                      alt="Hilbert envelope spectrum"
+                      className="w-full rounded-lg border border-slate-800"
+                    />
+                  </div>
+                )}
+
+                {/* Sensor Telemetry Readout */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {Object.entries(inspection?.sensor_telemetry || drawnPart?.telemetry || {})
+                    .filter(([, v]) => v !== null && v !== undefined)
+                    .map(([k, v]) => (
+                      <div key={k} className="p-2 rounded bg-slate-950 border border-slate-800">
+                        <div className="text-slate-400">{k}</div>
+                        <div className="font-mono font-bold text-slate-100">{String(v)}</div>
+                      </div>
+                    ))}
+                </div>
+              </section>
+
+              {/* Tier-1 Combined Gate Card */}
+              {t1 && (
+                <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2.5" aria-live="polite">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-bold text-white">Tier-1 Gate Verdict</h2>
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                        t1.pass_status === 'HEALTHY'
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/60'
+                          : 'bg-amber-950 text-amber-200 border border-amber-500/60'
+                      }`}
+                    >
+                      {t1.pass_status}
+                    </span>
+                  </div>
+                  <div className="text-xs space-y-1.5 text-slate-200">
+                    <div>
+                      <strong>Signal gate (DSP):</strong>{' '}
+                      {t1.t1a_flags?.length ? `⚠ ${t1.t1a_flags.join(', ')}` : '✓ nominal'} ({fmtMs(tel?.t1a_ms)})
+                    </div>
+                    <div>
+                      <strong>Visual gate ({t1.provenance_t1b?.model_id || t1.provenance_t1b?.producer}):</strong>{' '}
+                      {t1.t1b_vote === 'NOMINAL' ? '✓ NOMINAL' : `⚠ ${t1.t1b_vote}`} ({fmtMs(tel?.t1b_ms)})
+                    </div>
+                    <p className="text-slate-300 pt-1">{t1.escalation_reason}</p>
+                  </div>
+                </section>
               )}
             </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleAskCopilot();
-              }}
-              className="flex gap-1.5"
-            >
+            {/* Column 2: Tier-2 Root Cause, SOP Guard, Tier-3 Overlay & Provenance */}
+            <div className="lg:col-span-4 space-y-4">
+              {diag ? (
+                <>
+                  <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-sm font-bold text-white">2. Tier-2 Root-Cause Diagnosis</h2>
+                      <span className="px-2 py-0.5 rounded bg-sky-950 border border-sky-500/50 text-xs font-mono text-sky-200">
+                        {tel?.tier2_model_used || 'RULE-BASED'}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-bold text-white">
+                        {diag.defect_type}
+                      </span>
+                      <span className="px-2.5 py-1 rounded bg-rose-950/70 border border-rose-500/50 font-bold text-rose-200">
+                        {diag.severity}
+                      </span>
+                      <span className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 text-slate-300">
+                        SOP: {diag.matched_sop_id}
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-200 leading-relaxed">{diag.root_cause_analysis}</p>
+
+                    {/* Evidence */}
+                    {diag.evidence?.length > 0 && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-bold text-slate-300">Evidence</div>
+                        <ul className="space-y-1 text-xs text-slate-300">
+                          {diag.evidence.map((ev, i) => (
+                            <li key={i} className="bg-slate-950 p-2 rounded border border-slate-800">
+                              <span className="font-mono text-sky-300">[{ev.source}]</span> {ev.observation}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* SOP-Guarded Repair Steps */}
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-bold text-slate-300 flex items-center justify-between">
+                        <span>Repair Steps (SOP-Guarded)</span>
+                        {diag.unverified_value_count > 0 && (
+                          <span className="text-amber-300">
+                            ⚠ {diag.unverified_value_count} unverified value(s)
+                          </span>
+                        )}
+                      </div>
+                      <ol className="list-decimal list-inside space-y-1.5 text-xs text-slate-200">
+                        {(diag.repair_steps_checked?.length
+                          ? diag.repair_steps_checked
+                          : diag.repair_steps.map((s) => ({ text: s, unverified: false, unverified_values: [] }))
+                        ).map((step, i) => (
+                          <li key={i} className="leading-relaxed">
+                            {step.text}
+                            {step.unverified && (
+                              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-950 border border-amber-500 text-amber-200 font-semibold">
+                                ⚠ {t.unverifiedWarn} ({step.unverified_values.join(', ')})
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+
+                    {/* Deterministic Assumption-Based Economics */}
+                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+                      <div>
+                        <div className="text-xs text-slate-400">{t.avoidableLossLabel}</div>
+                        <div className="text-xs text-slate-500">
+                          {diag.estimated_downtime_prevented_mins} min est. downtime avoided
+                        </div>
+                      </div>
+                      <div className="text-lg font-extrabold font-mono text-emerald-300">
+                        ₹{Number(diag.estimated_avoidable_loss_inr || 0).toLocaleString('en-IN')}
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Tier-3 Deterministic Visual Repair Overlay */}
+                  {inspection?.tier3_visual_sop_data_url && (
+                    <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-sm font-bold text-white">3. Tier-3 Visual Repair Card</h2>
+                        <span className="text-xs text-slate-300 font-mono">
+                          {inspection.tier3_render_mode}
+                        </span>
+                      </div>
+                      <img
+                        src={inspection.tier3_visual_sop_data_url}
+                        alt="Visual repair overlay"
+                        className="w-full rounded-lg border border-slate-800"
+                      />
+                    </section>
+                  )}
+                </>
+              ) : (
+                t1 && (
+                  <section className="rounded-xl border border-emerald-700/50 bg-emerald-950/30 p-5 space-y-2">
+                    <h2 className="text-base font-bold text-emerald-200">
+                      Short-circuited at Tier-1 (HEALTHY)
+                    </h2>
+                    <p className="text-sm text-slate-300">
+                      Tier-2 root-cause diagnosis and Tier-3 overlay were skipped (0 Tier-2 tokens used).
+                    </p>
+                  </section>
+                )
+              )}
+
+              {/* Retrieved SOPs + Provenance Attempts Trace */}
+              {inspection && (
+                <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                  <h2 className="text-sm font-bold text-white">Stage Latencies &amp; Provenance</h2>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">T1-A DSP</div>
+                      <div className="font-mono font-bold text-white">{fmtMs(tel?.t1a_ms)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">T1-B Gate</div>
+                      <div className="font-mono font-bold text-white">{fmtMs(tel?.t1b_ms)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Retrieval</div>
+                      <div className="font-mono font-bold text-white">{fmtMs(tel?.retrieval_ms)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">T2 Diag</div>
+                      <div className="font-mono font-bold text-white">{fmtMs(tel?.tier2_ms)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">T3 Overlay</div>
+                      <div className="font-mono font-bold text-white">{fmtMs(tel?.tier3_ms)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Total</div>
+                      <div className="font-mono font-bold text-sky-300">{fmtMs(tel?.total_ms)}</div>
+                    </div>
+                  </div>
+
+                  {inspection.matched_sops?.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-xs font-bold text-slate-300">
+                        Retrieved SOPs ({tel?.retrieval_mode})
+                      </div>
+                      {inspection.matched_sops.map((s) => (
+                        <div key={s.id} className="text-xs p-2 rounded bg-slate-950 border border-slate-800 flex justify-between gap-2">
+                          <span className="font-mono text-sky-300">{s.id}</span>
+                          <span className="text-slate-300 truncate">{s.title}</span>
+                          <span className="font-mono text-emerald-300 shrink-0">{s.similarity_score}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <details className="text-xs">
+                    <summary className="cursor-pointer text-sky-300 font-semibold">
+                      Attempts trace ({inspection.provenance?.length || 0} stages)
+                    </summary>
+                    <div className="mt-2 space-y-1.5">
+                      {(inspection.provenance || []).map((p, idx) => (
+                        <div key={idx} className="p-2 rounded bg-slate-950 border border-slate-800 space-y-1">
+                          <div className="flex justify-between font-mono">
+                            <span className="text-white">{p.stage}</span>
+                            <span className="text-slate-300">
+                              {p.model_id || p.producer} • {p.latency_ms} ms
+                            </span>
+                          </div>
+                          {p.attempts?.length > 0 && (
+                            <div className="text-slate-400 font-mono">
+                              {p.attempts
+                                .map((a) => `${a.model_id} → ${a.status} (${a.latency_ms} ms)`)
+                                .join(' · ')}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </section>
+              )}
+            </div>
+
+            {/* Column 3: Co-Pilot, Line Run & Work Order Ledger */}
+            <div className="lg:col-span-4 space-y-4">
+              {/* Tier-4 Co-Pilot */}
+              <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold text-white flex items-center gap-1.5">
+                    <Volume2 className="w-4 h-4 text-sky-400" />
+                    4. {t.copilotTitle}
+                  </h2>
+                  <span className="text-xs font-mono text-slate-400">
+                    {copilotTransport === 'ws' ? 'WS /api/live-copilot' : 'REST fallback'}
+                  </span>
+                </div>
+
+                <div className="h-52 overflow-y-auto space-y-2 p-2 rounded-lg bg-slate-950 border border-slate-800">
+                  {copilotMessages.length === 0 && (
+                    <p className="text-xs text-slate-400 p-2">
+                      Ask a question in EN, हिन्दी, or मराठी grounded in the retrieved SOP.
+                    </p>
+                  )}
+                  {copilotMessages.map((m, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-2.5 rounded-lg text-xs space-y-1 ${
+                        m.role === 'user'
+                          ? 'bg-slate-800 text-slate-100 ml-6'
+                          : 'bg-sky-950/60 border border-sky-800/60 text-sky-100 mr-4'
+                      }`}
+                    >
+                      <div>{m.text}</div>
+                      {m.role === 'assistant' && (
+                        <div className="text-slate-400 font-mono flex flex-wrap gap-2 pt-1">
+                          <span>{m.model}</span>
+                          {m.latency_ms !== undefined && <span>• {m.latency_ms} ms</span>}
+                          {m.audioMode === 'live-audio' && <span>• Live audio</span>}
+                          {m.audioMode === 'device-tts' && <span>• Text fallback + device TTS</span>}
+                        </div>
+                      )}
+                      {m.unverified?.length > 0 && (
+                        <div className="text-amber-300 font-semibold">
+                          ⚠ {t.unverifiedWarn}: {m.unverified.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {voiceMessage && <p className="text-xs text-amber-300">{voiceMessage}</p>}
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendCopilotQuestion();
+                  }}
+                  className="flex gap-2"
+                >
+                  <button
+                    type="button"
+                    onClick={handleVoicePushToTalk}
+                    aria-label={t.pushToTalk}
+                    className={`min-h-[44px] min-w-[44px] rounded-lg flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                      isListening ? 'bg-rose-500 text-white' : 'bg-slate-800 hover:bg-slate-700 text-sky-300'
+                    }`}
+                  >
+                    {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                  </button>
+                  <input
+                    type="text"
+                    value={copilotInput}
+                    onChange={(e) => setCopilotInput(e.target.value)}
+                    placeholder={t.askPlaceholder}
+                    className="flex-1 min-h-[44px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isCopilotBusy}
+                    aria-label={t.send}
+                    className="px-3.5 min-h-[44px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </form>
+              </section>
+
+              {/* Line Run Measured Token Accounting */}
+              {lineRunResult && (
+                <section className="rounded-xl border border-amber-500/50 bg-amber-950/30 p-4 space-y-2 text-xs">
+                  <div className="font-bold text-amber-200 flex items-center justify-between">
+                    <span>Batch Line Run ({lineRunResult.line}, N={lineRunResult.parts_inspected})</span>
+                    <span className="font-mono">{fmtMs(lineRunResult.elapsed_ms)}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Escalated</div>
+                      <div className="font-mono font-bold text-white">
+                        {lineRunResult.escalated_count} / {lineRunResult.parts_inspected} ({lineRunResult.escalation_rate_pct}%)
+                      </div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Measured Token Saving</div>
+                      <div className="font-mono font-bold text-emerald-300">
+                        {lineRunResult.measured_token_saving_pct !== null
+                          ? `${lineRunResult.measured_token_saving_pct}%`
+                          : '—'}
+                      </div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Gated Tokens</div>
+                      <div className="font-mono text-white">{lineRunResult.gated_tokens.toLocaleString()}</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-slate-400">Est. Cloud-Only</div>
+                      <div className="font-mono text-white">
+                        {lineRunResult.cloud_only_estimated_tokens.toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-slate-300">{lineRunResult.note}</p>
+                </section>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ==================== HUMAN DISPOSITION + WORK ORDER (BOTH VIEWS) ==================== */}
+        {inspection && (
+          <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <FileCheck2 className="w-5 h-5 text-emerald-400" />
+                {t.dispositionTitle} — <span className="font-mono text-sky-300">{inspection.incident_id}</span>
+              </h2>
+              <span className="text-xs text-slate-300">
+                {t.aiRecommends}:{' '}
+                <strong className="text-amber-300">
+                  {diag?.recommended_disposition || (t1?.pass_status === 'HEALTHY' ? 'RELEASE' : 'HOLD')}
+                </strong>
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-xs text-slate-300 flex items-center gap-2">
+                {t.roleLabel}:
+                <select
+                  value={dispRole}
+                  onChange={(e) => setDispRole(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-xs text-white"
+                >
+                  <option value="QE">QE</option>
+                  <option value="Supervisor">Supervisor</option>
+                </select>
+              </label>
+
               <input
                 type="text"
-                value={copilotQuery}
-                onChange={(e) => setCopilotQuery(e.target.value)}
-                placeholder="Ask Gemini Live Co-Pilot about torque, spares, or LOTO..."
-                className="flex-1 rounded-lg bg-slate-950 border border-slate-800 px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-400"
+                value={dispNote}
+                onChange={(e) => setDispNote(e.target.value)}
+                placeholder="Optional disposition note..."
+                className="flex-1 min-w-[200px] min-h-[44px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
               />
-              <button
-                type="submit"
-                disabled={copilotLoading}
-                className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-1"
-              >
-                <Send className="w-3.5 h-3.5" />
-              </button>
-            </form>
-          </div>
 
-          {/* BOTTOM PANEL: PERSISTED WORK ORDERS & PLANT SAVINGS LEDGER */}
-          <div className="flex-1 bg-slate-900/70 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-2.5">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <div>
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-1.5">
-                  <Database className="w-4 h-4 text-emerald-400" />
-                  3B. Persisted Work Orders & Plant Savings
-                </h2>
-                <p className="text-[10px] font-mono text-slate-400">
-                  Survives Browser Refresh • Enriched via AI.EXTRACT() & AI.IF()
-                </p>
-              </div>
-              <div className="text-right">
-                <div className="text-sm font-bold font-mono text-emerald-400">
-                  ₹{workOrderLedger.total_scrap_saved_inr.toLocaleString('en-IN')}
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  Cumulative Saved ({workOrderLedger.total_work_orders} WOs)
-                </div>
+              <div className="flex flex-wrap gap-2">
+                {['RELEASE', 'HOLD', 'REWORK', 'SCRAP'].map((dec) => (
+                  <button
+                    key={dec}
+                    type="button"
+                    disabled={isSavingDisp}
+                    onClick={() => handleRecordDisposition(dec)}
+                    className={`px-4 py-2.5 min-h-[44px] rounded-lg font-bold text-xs border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
+                      disposition?.decision === dec
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                        : 'bg-slate-800 hover:bg-slate-700 text-white border-slate-600'
+                    }`}
+                  >
+                    {dec}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-              {workOrderLedger.work_orders.map((wo) => (
-                <div
-                  key={wo.id}
-                  className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 space-y-1.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-mono font-bold text-cyan-300">
-                        {wo.id}
-                      </span>
-                      <span className="text-[10px] font-mono text-slate-400">
-                        ({wo.machine_id})
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold ${
-                        wo.sla_critical_flag
-                          ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                          : 'bg-emerald-500/20 text-emerald-300'
-                      }`}
-                    >
-                      {wo.sla_critical_flag ? 'AI.IF: SLA CRITICAL' : 'STANDARD PM'}
+            {disposition && (
+              <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-700/50 rounded-lg px-3 py-2">
+                Recorded: <strong>{disposition.decision}</strong> by <strong>{disposition.role}</strong> at{' '}
+                {disposition.recorded_at}
+              </div>
+            )}
+
+            {/* Work Order Form (unlocked ONLY after HOLD/REWORK/SCRAP) */}
+            {canLogWorkOrder ? (
+              <form onSubmit={handleLogWorkOrder} className="space-y-3 pt-2 border-t border-slate-800">
+                <textarea
+                  rows={2}
+                  value={woNotes}
+                  onChange={(e) => setWoNotes(e.target.value)}
+                  placeholder="Enter operator note in English, Hindi, or Marathi (Gemini extracts part_code, priority, spares & SLA risk)..."
+                  className="w-full p-3 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-400">{t.demoStoreNote}</span>
+                  <button
+                    type="submit"
+                    disabled={isLoggingWo || !woNotes.trim()}
+                    className="px-5 py-2.5 min-h-[44px] rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm disabled:opacity-50"
+                  >
+                    {isLoggingWo ? 'Logging...' : t.logWorkOrder}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="text-xs text-slate-400 pt-1">{t.unlockHint}</p>
+            )}
+
+            {woError && <p className="text-xs text-rose-300">{woError}</p>}
+          </section>
+        )}
+
+        {/* Work Order Ledger */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-white">{t.ledgerTitle}</h2>
+              <p className="text-xs text-slate-400">{t.demoStoreNote}</p>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-400">Estimated avoidable loss logged (assumptions)</div>
+              <div className="text-lg font-extrabold font-mono text-emerald-300">
+                ₹{Number(totalAvoidableLoss).toLocaleString('en-IN')}
+              </div>
+            </div>
+          </div>
+
+          {workOrders.length === 0 ? (
+            <p className="text-xs text-slate-400">No work orders logged yet in this demo session.</p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {workOrders.slice(0, 6).map((wo) => (
+                <div key={wo.id} className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono font-bold text-sky-300">{wo.id}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-mono">
+                      {wo.extraction_model_id || wo.extraction_producer}
                     </span>
                   </div>
-
-                  <p className="text-[11px] text-slate-300 line-clamp-2">
-                    {wo.operator_notes}
-                  </p>
-
-                  <div className="flex flex-wrap items-center gap-1 pt-0.5 text-[10px] font-mono">
-                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                      SKU: {wo.extracted_tags_json.part_code}
-                    </span>
-                    <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                      {wo.extracted_tags_json.shift_priority}
-                    </span>
-                    {wo.extracted_tags_json.required_spares?.slice(0, 1).map((sp, i) => (
-                      <span
-                        key={i}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 truncate max-w-[190px]"
-                      >
-                        {sp}
-                      </span>
-                    ))}
-                    <span className="ml-auto text-emerald-400 font-bold">
-                      +₹{(wo.scrap_saved_inr || 0).toLocaleString('en-IN')}
-                    </span>
+                  <p className="text-slate-200">{wo.operator_notes}</p>
+                  <div className="flex flex-wrap gap-2 text-slate-300">
+                    <span>SKU: <strong>{wo.extracted_tags_json?.part_code}</strong></span>
+                    <span>Priority: <strong>{wo.extracted_tags_json?.shift_priority}</strong></span>
+                    {wo.sla_critical_flag && (
+                      <span className="text-rose-300 font-bold">SLA RISK</span>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </section>
       </main>
 
-      {/* AI STACK & ARCHITECTURE MODAL */}
-      {archModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-5xl w-full max-h-[90vh] overflow-y-auto p-5 space-y-5 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-cyan-400" />
-                  Vinyas — Multi-Model Google AI Stack, Progressive Skills & Stage Latencies
-                </h2>
-                <p className="text-xs text-slate-400 font-mono">
-                  Explicit Non-Overlapping Engineering Justification for Every Model & Database Component
-                </p>
-              </div>
+      {/* Metrics Modal */}
+      {metricsModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-2xl w-full p-5 space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Activity className="w-5 h-5 text-sky-400" />
+                Live Model Health &amp; Routing Config (/api/metrics)
+              </h2>
               <button
-                onClick={() => setArchModalOpen(false)}
-                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                type="button"
+                onClick={() => setMetricsModalOpen(false)}
+                aria-label="Close metrics modal"
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-400 font-mono">
-                A. Google AI Model-to-Role Justification Matrix
-              </h3>
-              <div className="overflow-x-auto border border-slate-800 rounded-xl">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-950 text-slate-400 font-mono uppercase text-[11px]">
-                    <tr>
-                      <th className="p-2.5 border-b border-slate-800">Pipeline Tier</th>
-                      <th className="p-2.5 border-b border-slate-800">Google Model / Engine</th>
-                      <th className="p-2.5 border-b border-slate-800">Why This Model</th>
-                      <th className="p-2.5 border-b border-slate-800">Exact Use in Vinyas</th>
+            {metricsData?.routing_config && (
+              <div className="text-xs space-y-1">
+                <div className="font-bold text-slate-300">Active Routing Config</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {Object.entries(metricsData.routing_config).map(([k, v]) => (
+                    <div key={k} className="p-2 rounded bg-slate-950 border border-slate-800 font-mono">
+                      <span className="text-slate-400">{k}:</span>{' '}
+                      <span className="text-sky-300">{String(v)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="text-xs space-y-1">
+              <div className="font-bold text-slate-300">Per-Model Counters Since Startup</div>
+              {metricsData?.models && Object.keys(metricsData.models).length > 0 ? (
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-700 text-slate-400">
+                      <th className="py-1.5">Model / Stage</th>
+                      <th className="py-1.5">OK</th>
+                      <th className="py-1.5">Fallback</th>
+                      <th className="py-1.5">Errors</th>
+                      <th className="py-1.5">p50</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {(health?.model_justification_matrix || []).map((row, idx) => (
-                      <tr key={idx} className="hover:bg-slate-950/50">
-                        <td className="p-2.5 font-bold text-cyan-300 whitespace-nowrap">
-                          {row.tier}
-                        </td>
-                        <td className="p-2.5 font-mono text-emerald-300">
-                          {row.model}
-                        </td>
-                        <td className="p-2.5 text-slate-300">{row.why}</td>
-                        <td className="p-2.5 text-slate-200">{row.exact_use}</td>
+                  <tbody>
+                    {Object.entries(metricsData.models).map(([m, st]) => (
+                      <tr key={m} className="border-b border-slate-800 font-mono">
+                        <td className="py-1.5 text-sky-300">{m}</td>
+                        <td className="py-1.5 text-emerald-300">{st.ok}</td>
+                        <td className="py-1.5 text-amber-300">{st.fallback}</td>
+                        <td className="py-1.5 text-rose-300">{st.errors}</td>
+                        <td className="py-1.5 text-slate-200">{fmtMs(st.p50_ms)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-purple-400 font-mono">
-                B. Authentic Google Agent Skills (/.agents/skills/) — Progressive Disclosure Status
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                {(health?.skills || []).map((sk) => (
-                  <div
-                    key={sk.name}
-                    className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono font-bold text-xs text-white">
-                        .agents/skills/{sk.name}/SKILL.md
-                      </span>
-                      <span
-                        className={`text-[10px] font-mono px-2 py-0.5 rounded ${
-                          sk.full_body_loaded
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                            : 'bg-slate-800 text-slate-400'
-                        }`}
-                      >
-                        {sk.full_body_loaded
-                          ? `FULL SKILL LOADED (${sk.activation_count}x)`
-                          : 'FRONTMATTER ONLY (0 Body Tokens)'}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">{sk.description}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">
-                C. Live Stage Latency Telemetry
-              </h3>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-2.5 font-mono text-xs">
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <span className="text-slate-400 text-[10px] block">tier1_ms (Edge Gate)</span>
-                  <span className="text-lg font-bold text-cyan-300">
-                    {telemetry?.tier1_ms ?? 24} ms
-                  </span>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <span className="text-slate-400 text-[10px] block">scann_rag_ms (AlloyDB)</span>
-                  <span className="text-lg font-bold text-cyan-300">
-                    {telemetry?.scann_rag_ms ?? 4} ms
-                  </span>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <span className="text-slate-400 text-[10px] block">tier2_ms (Gemini 4)</span>
-                  <span className="text-lg font-bold text-cyan-300">
-                    {telemetry?.tier2_ms ?? 48} ms
-                  </span>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
-                  <span className="text-slate-400 text-[10px] block">tier3_ms (Nano Banana)</span>
-                  <span className="text-lg font-bold text-cyan-300">
-                    {telemetry?.tier3_ms ?? 22} ms
-                  </span>
-                </div>
-                <div className="p-3 rounded-xl bg-slate-950 border border-emerald-500/40">
-                  <span className="text-slate-400 text-[10px] block">total_ms (End-to-End)</span>
-                  <span className="text-lg font-bold text-emerald-400">
-                    {telemetry?.total_ms ?? 98} ms
-                  </span>
-                </div>
-              </div>
+              ) : (
+                <p className="text-slate-400">No model calls recorded yet since server startup.</p>
+              )}
             </div>
           </div>
         </div>

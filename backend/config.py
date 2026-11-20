@@ -42,9 +42,9 @@ class Settings(BaseSettings):
     # Verified Google AI model routing configuration (see eval/model_selection.md)
     tier1_visual_gate_model: str = "gemma-4-26b-a4b-it"
     tier1_fallback_model: str = "gemini-3.1-flash-lite"
-    tier2_primary_model: str = "gemini-3.5-flash"
-    tier2_fallback_model: str = "gemini-3.1-flash-lite"
-    tier2_hedge_delay_sec: float = 4.5
+    tier2_primary_model: str = "gemini-3.1-flash-lite"
+    tier2_fallback_model: str = "gemini-3.8-flash"
+    tier2_hedge_delay_sec: float = 6.0
     tier4_live_copilot_model: str = "gemini-3.8-live"
     tier4_fallback_model: str = "gemini-3.1-flash-lite"
     embedding_model: str = "gemini-embedding-2"

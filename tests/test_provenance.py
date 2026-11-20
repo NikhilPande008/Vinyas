@@ -56,7 +56,21 @@ def test_provenance_records_exact_model_and_attempts():
     model_router.set_client(SimpleNamespace(models=fake_models))
     try:
         client = TestClient(app)
-        resp = client.post("/api/inspect", json={"scenario_key": "LINE_A_PCB"})
+        resp = client.post(
+            "/api/inspect",
+            json={
+                "line": "PCB",
+                "sensor_telemetry": {
+                    "vibration_khz": 0.3,
+                    "vibration_rms_mms": 0.6,
+                    "temperature_c": 242.0,
+                    "line_speed_rpm": 1200,
+                    "reflow_ramp_c_per_s": 2.0,
+                    "reflow_peak_c": 242.0,
+                    "reflow_tal_s": 65.0,
+                },
+            },
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["tier1_triage"]["pass_status"] == "HEALTHY"

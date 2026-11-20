@@ -1,14 +1,13 @@
 """Vinyas — Single-Container FastAPI Backend (`backend/main.py`).
 
 Serves on port 8080:
-- `GET /health` — Cloud Run + AlloyDB Express ScaNN + In-SQL AI + Google AI readiness
-- `GET /api/scenarios` — 4 Virtual Factory Line Simulator scenarios
-- `GET /api/skills` — `.agents/skills/` Progressive Disclosure status
-- `GET /api/assets/{filename}` — High-contrast inspection PNGs & 48 kHz WAV audio
-- `POST /api/inspect` — Full 5-stage Edge-to-Cloud inspection pipeline (with Scenario 4 Tier-1 short-circuit)
-- `GET /api/work-orders` & `POST /api/work-orders` — AlloyDB `AI.EXTRACT()` & `AI.IF()` work order ledger
-- `POST /api/copilot/chat` & `WS /api/live-copilot` — Tier-4 Hands-Free Floor Technician Co-Pilot (`gemini-3.8-live`)
-- Static SPA serving of `/frontend/dist` at `/` for zero-CORS single-container Cloud Run deployment
+- `GET /health` & `GET /api/metrics` — Truthful runtime routing & per-model counters
+- `GET /api/lines`, `POST /api/rig/draw`, `GET /api/rig/reveal/{sample_id}` — Mock Rig v2 blind mode
+- `POST /api/inspect` — T1-A DSP + T1-B Gemma 4 + Embedding Retrieval + Hedged T2 + T3 Overlay
+- `POST /api/line-run` — Batch run with measured gated vs cloud-only token accounting
+- `POST /api/incidents/{id}/disposition` & `POST /api/work-orders` — Human disposition & work orders
+- `WS /api/live-copilot` & `POST /api/copilot/chat` — Tier-4 Floor Co-Pilot (`gemini-3.8-live`)
+- Static SPA serving of `/frontend/dist` at `/` with path-traversal protection
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.config import PROJECT_ROOT, get_settings
-from backend.db.alloydb_service import AlloyDBService
+from backend.db.demo_store import DemoStoreService
 from backend.dsp.envelope import evaluate_t1a_signal_gate
 from backend.mock_rig.dataset import (
     LINE_DEFINITIONS,
@@ -42,6 +41,8 @@ from backend.mock_rig.dataset import (
 from backend.schemas import (
     CopilotChatRequest,
     CopilotChatResponse,
+    DispositionCreate,
+    DispositionRecord,
     InspectionRequest,
     InspectionResponse,
     SensorTelemetry,
@@ -52,11 +53,12 @@ from backend.schemas import (
 )
 from backend.services.gate import combine_tier1_votes
 from backend.services.model_router import GoogleModelRouter
+from backend.services.overlay import render_model_bbox_overlay
 from backend.services.rate_limiter import TokenBucketRateLimiter
 from backend.services.skill_loader import get_skill_loader
 
 
-alloydb_service = AlloyDBService()
+demo_store = DemoStoreService()
 model_router = GoogleModelRouter()
 skill_loader = get_skill_loader()
 rate_limiter = TokenBucketRateLimiter(capacity=30, window_seconds=600)
@@ -70,11 +72,16 @@ class DrawRequest(BaseModel):
     line: str = "PCB"
 
 
+class LineRunRequest(BaseModel):
+    line: str = "CNC"
+    n: int = 12
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_dataset()
     skill_loader.discover_metadata_only()
-    await alloydb_service.initialize()
+    await demo_store.initialize_embeddings(model_router._client)
     yield
 
 
@@ -110,8 +117,9 @@ async def health_check() -> dict[str, Any]:
         "cloud_run_ready": True,
         "gcp_project_id": settings.resolved_project_id,
         "region": settings.gcp_location,
-        "storage_mode": alloydb_service.storage_mode,
+        "storage_mode": demo_store.storage_mode,
         "storage_note": "Demo SQLite store — resets when the server restarts",
+        "retrieval_mode": demo_store.retrieval_mode,
         "loaded_skills_count": len(skills_status),
         "skills": skills_status,
         "routing_config": model_router.get_routing_config(),
@@ -333,15 +341,16 @@ async def run_edge_to_cloud_inspection(
         in_tok = sum((a.input_tokens or 0) for p in provenance_list for a in p.attempts)
         out_tok = sum((a.output_tokens or 0) for p in provenance_list for a in p.attempts)
         inf_mode = "LIVE_MODEL" if any(p.producer in ("MODEL", "FALLBACK_MODEL") for p in provenance_list) else "FALLBACK_RULES"
-        await alloydb_service.log_incident(
+        await demo_store.log_incident(
             incident_id=incident_id,
-            scenario_key=scenario_key,
+            line=line,
+            sample_id=sample_id,
             line_name=line_meta["line_name"],
             tier1_status="HEALTHY",
-            defect_class="NONE",
+            defect_type="NO_DEFECT_FOUND",
             severity="LOW",
             root_cause=tier1_result.escalation_reason,
-            scrap_saved_inr=0,
+            avoidable_loss_inr=0,
             inference_mode=inf_mode,
             latency_ms=total_ms,
         )
@@ -353,7 +362,8 @@ async def run_edge_to_cloud_inspection(
             tier2_ms=0,
             tier3_ms=0,
             total_ms=total_ms,
-            storage_mode=alloydb_service.storage_mode,
+            storage_mode=demo_store.storage_mode,
+            retrieval_mode=demo_store.retrieval_mode,
             inference_mode=inf_mode,
             tier1_model_used=t1b_prov.model_id,
             tier2_model_used=None,
@@ -384,48 +394,64 @@ async def run_edge_to_cloud_inspection(
             telemetry=telemetry,
         )
 
-    # STAGE 2: Skill Activation + SOP Retrieval
-    active_skill = skill_loader.activate_skill_for_scenario(scenario_key)
-    matched_sops, retrieval_ms = await alloydb_service.search_sops_scann(
-        query_text=f"{line_meta['line_name']} {tier1_result.escalation_reason}",
-        scenario_key=scenario_key,
+    # STAGE 2: Progressive Skill Activation + Real Embedding SOP Retrieval
+    active_skill = skill_loader.activate_skill_for_line(line, t1a_result.all_flags)
+    retrieval_query = (
+        f"{line} {line_meta['line_name']} flags: {' '.join(t1a_result.all_flags)} "
+        f"observations: {' '.join(t1b_obs)}"
+    )
+    matched_sops, ret_prov = await demo_store.search_sops(
+        query_text=retrieval_query,
+        genai_client=model_router._client,
         limit=3,
+        input_simulated=input_simulated,
     )
-    provenance_list.append(
-        StageProvenance(
-            stage="RETRIEVAL",
-            producer="DETERMINISTIC",
-            model_id=None,
-            latency_ms=retrieval_ms,
-            input_simulated=input_simulated,
-        )
-    )
+    retrieval_ms = ret_prov.latency_ms
+    provenance_list.append(ret_prov)
 
-    # STAGE 3: Tier-2 Multimodal Diagnosis
+    # STAGE 3: Tier-2 Multimodal Diagnosis (hedged primary/runner-up + SOP guard + deterministic economics)
     diagnosis, t2_prov = await model_router.run_tier2_multimodal_diagnosis(
-        scenario_key=scenario_key,
+        line=line,
         sensor_telemetry=sensor_telemetry,
+        dsp_features=t1a_result.features,
+        t1a_flags=t1a_result.all_flags,
         raw_image_bytes=raw_image_bytes,
+        envelope_png_bytes=t1a_result.envelope_png_bytes,
         matched_sops=matched_sops,
         active_skill=active_skill,
+        language=request.language,
         input_simulated=input_simulated,
     )
     provenance_list.append(t2_prov)
+
+    # STAGE 4: Tier-3 Deterministic Visual Repair Overlay (model bbox only; never hard-coded)
+    matched_sop_obj = next((s for s in matched_sops if s.id == diagnosis.matched_sop_id), None)
+    torque_spec = matched_sop_obj.torque_spec if matched_sop_obj else "Verify against matched SOP"
+    visual_overlay_url, t3_prov = render_model_bbox_overlay(
+        raw_image_bytes=raw_image_bytes,
+        diagnosis=diagnosis,
+        torque_spec=torque_spec,
+        bbox_source_model=t2_prov.model_id or t1b_prov.model_id,
+        fallback_bbox_hint=t1b_bbox if line != "CNC" else None,
+        input_simulated=input_simulated,
+    )
+    provenance_list.append(t3_prov)
 
     total_ms = int((time.perf_counter() - t_start) * 1000)
     in_tok = sum((a.input_tokens or 0) for p in provenance_list for a in p.attempts)
     out_tok = sum((a.output_tokens or 0) for p in provenance_list for a in p.attempts)
     inf_mode = "LIVE_MODEL" if any(p.producer in ("MODEL", "FALLBACK_MODEL") for p in provenance_list) else "FALLBACK_RULES"
 
-    await alloydb_service.log_incident(
+    await demo_store.log_incident(
         incident_id=diagnosis.incident_id,
-        scenario_key=scenario_key,
+        line=line,
+        sample_id=sample_id,
         line_name=line_meta["line_name"],
         tier1_status=tier1_result.pass_status,
-        defect_class=diagnosis.defect_class or diagnosis.defect_type,
+        defect_type=diagnosis.defect_type,
         severity=diagnosis.severity,
         root_cause=diagnosis.root_cause_analysis,
-        scrap_saved_inr=diagnosis.estimated_avoidable_loss_inr,
+        avoidable_loss_inr=diagnosis.estimated_avoidable_loss_inr,
         inference_mode=inf_mode,
         latency_ms=total_ms,
     )
@@ -436,13 +462,14 @@ async def run_edge_to_cloud_inspection(
         t1b_ms=t1b_prov.latency_ms,
         retrieval_ms=retrieval_ms,
         tier2_ms=t2_prov.latency_ms,
-        tier3_ms=0,
+        tier3_ms=t3_prov.latency_ms,
         total_ms=total_ms,
-        storage_mode=alloydb_service.storage_mode,
+        storage_mode=demo_store.storage_mode,
+        retrieval_mode=ret_prov.note or demo_store.retrieval_mode,
         inference_mode=inf_mode,
         tier1_model_used=t1b_prov.model_id,
         tier2_model_used=t2_prov.model_id,
-        tier3_model_used=None,
+        tier3_model_used=t3_prov.note,
         total_input_tokens=in_tok,
         total_output_tokens=out_tok,
     )
@@ -468,29 +495,161 @@ async def run_edge_to_cloud_inspection(
             "full_body_loaded": active_skill["full_body_loaded"],
             "activation_count": active_skill["activation_count"],
             "references_loaded": list(active_skill["references"].keys()),
+            "selection_mode": "deterministic (from line + T1-A flags)",
         },
         tier2_diagnosis=diagnosis,
-        tier3_visual_sop_data_url=None,
-        tier3_render_mode="PENDING_PHASE_4",
+        tier3_visual_sop_data_url=visual_overlay_url,
+        tier3_render_mode=t3_prov.note,
         provenance=provenance_list,
         telemetry=telemetry,
     )
 
 
+@app.post("/api/line-run")
+async def run_batch_line_run(
+    req: LineRunRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    """Run a batch of N random parts through Tier-1 and escalate only flagged parts to Tier-2.
+
+    Measures real gated vs cloud-only token accounting from API usage_metadata.
+    """
+    rate_limiter.check_request(http_request, cost=10)
+    line = req.line.upper()
+    if line not in LINE_DEFINITIONS:
+        raise HTTPException(status_code=400, detail="Invalid line. Use PCB, CNC, or WELD.")
+    n = max(5, min(20, int(req.n)))
+    t0 = time.perf_counter()
+
+    parts_log: list[dict[str, Any]] = []
+    t1b_tokens_total = 0
+    t2_tokens_list: list[int] = []
+    escalated_count = 0
+
+    for _ in range(n):
+        sample = draw_random_sample(line)
+        sid = sample["sample_id"]
+        _inspected_samples.add(sid)
+        telemetry = SensorTelemetry(**sample["telemetry"])
+        wav_path = Path(sample["wav_path"]) if sample.get("wav_path") else None
+        raw_img = Path(sample["frame_path"]).read_bytes()
+        line_meta = LINE_DEFINITIONS[line]
+
+        t1a = evaluate_t1a_signal_gate(line=line, telemetry=telemetry, wav_path=wav_path)
+        t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
+            line=line,
+            line_meta=line_meta,
+            t1a_features=t1a.features,
+            t1a_flags=t1a.all_flags,
+            raw_image_bytes=raw_img,
+            input_simulated=True,
+        )
+        t1_res = combine_tier1_votes(
+            t1a=t1a,
+            t1b_vote=t1b_vote,
+            t1b_confidence=t1b_conf,
+            t1b_observations=t1b_obs,
+            t1b_bbox_hint=t1b_bbox,
+            t1b_provenance=t1b_prov,
+            input_simulated=True,
+        )
+        t1_tok = sum((a.input_tokens or 0) + (a.output_tokens or 0) for a in t1b_prov.attempts)
+        t1b_tokens_total += t1_tok
+
+        t2_defect = None
+        t2_tok = 0
+        if t1_res.pass_status == "ESCALATE":
+            escalated_count += 1
+            active_skill = skill_loader.activate_skill_for_line(line, t1a.all_flags)
+            sops, _ = await demo_store.search_sops(
+                query_text=f"{line} {' '.join(t1a.all_flags)} {' '.join(t1b_obs)}",
+                genai_client=model_router._client,
+                limit=3,
+                input_simulated=True,
+            )
+            diag, t2_prov = await model_router.run_tier2_multimodal_diagnosis(
+                line=line,
+                sensor_telemetry=telemetry,
+                dsp_features=t1a.features,
+                t1a_flags=t1a.all_flags,
+                raw_image_bytes=raw_img,
+                envelope_png_bytes=t1a.envelope_png_bytes,
+                matched_sops=sops,
+                active_skill=active_skill,
+                input_simulated=True,
+            )
+            t2_defect = diag.defect_type
+            t2_tok = sum((a.input_tokens or 0) + (a.output_tokens or 0) for a in t2_prov.attempts)
+            t2_tokens_list.append(t2_tok)
+
+        parts_log.append(
+            {
+                "sample_id": sid,
+                "verdict": t1_res.pass_status,
+                "t1a_flags": t1a.all_flags,
+                "t1b_model": t1b_prov.model_id,
+                "t2_defect_type": t2_defect,
+                "t1_tokens": t1_tok,
+                "t2_tokens": t2_tok,
+            }
+        )
+
+    gated_tokens = t1b_tokens_total + sum(t2_tokens_list)
+    mean_t2 = int(sum(t2_tokens_list) / len(t2_tokens_list)) if t2_tokens_list else 0
+    cloud_only_tokens = n * mean_t2
+    saving_pct = (
+        round(100.0 * (1.0 - gated_tokens / cloud_only_tokens), 1)
+        if cloud_only_tokens > 0
+        else None
+    )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    return {
+        "line": line,
+        "parts_inspected": n,
+        "escalated_count": escalated_count,
+        "escalation_rate_pct": round(100.0 * escalated_count / n, 1),
+        "gated_tokens": gated_tokens,
+        "cloud_only_estimated_tokens": cloud_only_tokens,
+        "measured_token_saving_pct": saving_pct,
+        "note": "Measured from API usage_metadata on simulated mock-rig draws; real plant savings depend on the plant's defect rate.",
+        "elapsed_ms": elapsed_ms,
+        "parts": parts_log,
+    }
+
+
+@app.post("/api/incidents/{incident_id}/disposition", response_model=DispositionRecord)
+async def record_incident_disposition(
+    incident_id: str,
+    payload: DispositionCreate,
+) -> DispositionRecord:
+    """Record a human QE or Supervisor disposition (RELEASE / HOLD / REWORK / SCRAP)."""
+    return demo_store.record_disposition(incident_id, payload)
+
+
+@app.get("/api/incidents/{incident_id}/disposition")
+async def get_incident_disposition(incident_id: str) -> dict[str, Any]:
+    rec = demo_store.get_disposition(incident_id)
+    return {"disposition": rec.model_dump() if rec else None}
+
+
 @app.post("/api/work-orders", response_model=WorkOrderRecord)
 async def create_work_order(payload: WorkOrderCreate) -> WorkOrderRecord:
-    """Create and enrich a work order using AlloyDB `AI.EXTRACT()` and `AI.IF()`."""
-    return await alloydb_service.create_work_order(payload)
+    """Create a work order (requires prior human HOLD/REWORK/SCRAP disposition)."""
+    try:
+        return await demo_store.create_work_order(payload, genai_client=model_router._client)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/work-orders")
 async def list_work_orders() -> dict[str, Any]:
-    """List persisted work orders and cumulative plant INR savings."""
-    orders = await alloydb_service.list_work_orders(limit=25)
+    """List persisted work orders from the demo SQLite store."""
+    orders = await demo_store.list_work_orders(limit=25)
     total_avoidable_loss_inr = sum(o.avoidable_loss_inr for o in orders)
     critical_count = sum(1 for o in orders if o.sla_critical_flag)
     return {
-        "storage_mode": alloydb_service.storage_mode,
+        "storage_mode": demo_store.storage_mode,
         "storage_note": "Demo store — resets when the server restarts",
         "total_work_orders": len(orders),
         "critical_sla_count": critical_count,
@@ -504,20 +663,23 @@ async def copilot_chat(
     request: CopilotChatRequest,
     http_request: Request,
 ) -> CopilotChatResponse:
-    """REST endpoint for the Tier-4 Hands-Free Floor Technician Co-Pilot."""
+    """REST fallback endpoint for the Tier-4 Floor Technician Co-Pilot."""
     rate_limiter.check_request(http_request, cost=1)
-    sops, _ = await alloydb_service.search_sops_scann(
-        query_text=f"{request.scenario_key} {request.question}",
-        scenario_key=request.scenario_key,
-        limit=1,
-    )
-    matched_sop = sops[0]
+    matched_sop = demo_store.get_sop_by_id(request.matched_sop_id) if request.matched_sop_id else None
+    if matched_sop is None:
+        sops, _ = await demo_store.search_sops(
+            query_text=f"{request.line} {request.question}",
+            genai_client=model_router._client,
+            limit=1,
+            input_simulated=False,
+        )
+        matched_sop = sops[0]
     return await model_router.run_tier4_live_copilot(request=request, matched_sop=matched_sop)
 
 
 @app.websocket("/api/live-copilot")
 async def websocket_live_copilot(websocket: WebSocket):
-    """WebSocket streaming endpoint backed by `gemini-3.8-live` with automatic flash fallback."""
+    """Primary WebSocket endpoint for the Tier-4 Floor Technician Co-Pilot (`gemini-3.8-live`)."""
     await websocket.accept()
     try:
         while True:
@@ -525,21 +687,31 @@ async def websocket_live_copilot(websocket: WebSocket):
             try:
                 payload = json.loads(raw_msg)
             except Exception:
-                payload = {"question": raw_msg, "scenario_key": "LINE_A_PCB"}
+                payload = {"question": raw_msg, "line": "PCB"}
 
+            lang = payload.get("language", "en-IN")
+            if lang not in ("en-IN", "hi-IN", "mr-IN"):
+                lang = "en-IN"
+            line_val = str(payload.get("line") or "PCB").upper()
             req = CopilotChatRequest(
                 question=str(payload.get("question") or "What is the torque spec and repair step?"),
-                scenario_key=str(payload.get("scenario_key") or "LINE_A_PCB"),
+                line=line_val,
+                scenario_key=payload.get("scenario_key"),
                 incident_id=payload.get("incident_id"),
                 defect_class=payload.get("defect_class"),
                 matched_sop_id=payload.get("matched_sop_id"),
+                language=lang,
             )
-            sops, _ = await alloydb_service.search_sops_scann(
-                query_text=f"{req.scenario_key} {req.question}",
-                scenario_key=req.scenario_key,
-                limit=1,
-            )
-            resp = await model_router.run_tier4_live_copilot(request=req, matched_sop=sops[0])
+            matched_sop = demo_store.get_sop_by_id(req.matched_sop_id) if req.matched_sop_id else None
+            if matched_sop is None:
+                sops, _ = await demo_store.search_sops(
+                    query_text=f"{req.line} {req.question}",
+                    genai_client=model_router._client,
+                    limit=1,
+                    input_simulated=False,
+                )
+                matched_sop = sops[0]
+            resp = await model_router.run_tier4_live_copilot(request=req, matched_sop=matched_sop)
             await websocket.send_json(resp.model_dump())
     except WebSocketDisconnect:
         return
