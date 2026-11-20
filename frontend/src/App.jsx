@@ -453,10 +453,13 @@ export default function App() {
   const verdictStyle = useMemo(() => {
     if (!t1) return null;
     if (t1.pass_status === 'HEALTHY') {
+      const released = disposition?.decision === 'RELEASE';
       return {
-        label: t.passVerdict,
-        bg: 'bg-emerald-950/80 border-emerald-500 text-emerald-100',
-        icon: <CheckCircle2 className="w-8 h-8 text-emerald-400 shrink-0" />,
+        label: released ? t.passReleased : t.passAwaitingRelease,
+        bg: released
+          ? 'bg-emerald-950/80 border-emerald-500 text-emerald-100'
+          : 'bg-sky-950/80 border-sky-400 text-sky-100',
+        icon: <CheckCircle2 className={`w-8 h-8 shrink-0 ${released ? 'text-emerald-400' : 'text-sky-300'}`} />,
       };
     }
     if (diag?.severity === 'CRITICAL') {
@@ -471,7 +474,7 @@ export default function App() {
       bg: 'bg-amber-950/85 border-amber-500 text-amber-100',
       icon: <AlertTriangle className="w-8 h-8 text-amber-400 shrink-0" />,
     };
-  }, [t1, diag, t]);
+  }, [t1, diag, disposition, t]);
 
   const canLogWorkOrder =
     disposition && ['HOLD', 'REWORK', 'SCRAP'].includes(disposition.decision);
@@ -513,7 +516,7 @@ export default function App() {
                   key={lng.code}
                   type="button"
                   onClick={() => setLanguage(lng.code)}
-                  className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                  className={`px-3 py-2 min-h-[48px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                     language === lng.code
                       ? 'bg-sky-500 text-slate-950'
                       : 'text-slate-300 hover:text-white'
@@ -529,7 +532,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setViewMode('operator')}
-                className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                className={`px-3 py-2 min-h-[48px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                   viewMode === 'operator' ? 'bg-emerald-500 text-slate-950' : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -538,7 +541,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setViewMode('engineer')}
-                className={`px-3 py-1.5 min-h-[36px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                className={`px-3 py-2 min-h-[48px] text-xs font-semibold rounded-md transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                   viewMode === 'engineer' ? 'bg-sky-500 text-slate-950' : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -553,7 +556,7 @@ export default function App() {
                   fetchMetrics();
                   setMetricsModalOpen(true);
                 }}
-                className="px-3 py-1.5 min-h-[36px] rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-100 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                className="px-3 py-2 min-h-[48px] rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-100 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
               >
                 <BarChart3 className="w-4 h-4 text-sky-300" />
                 Metrics
@@ -587,7 +590,7 @@ export default function App() {
                       : 'border-slate-700 bg-slate-950/60 text-slate-300 hover:border-slate-500'
                   }`}
                 >
-                  <div className="text-sm font-bold">{lineObj.short}</div>
+                  <div className="text-sm font-bold">{t.lines?.[lineObj.id] || lineObj.short}</div>
                   <div className="text-xs text-slate-400 mt-0.5">{lineObj.machine}</div>
                 </button>
               );
@@ -650,14 +653,14 @@ export default function App() {
 
             {uploadedPreview && (
               <label className="flex items-center gap-2 text-xs text-slate-300">
-                Telemetry preset:
+                {t.sensorPresetLabel}
                 <select
                   value={uploadTelemetryPreset}
                   onChange={(e) => setUploadTelemetryPreset(e.target.value)}
-                  className="bg-slate-950 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-100"
+                  className="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 min-h-[48px] text-xs text-slate-100"
                 >
-                  <option value="nominal">Nominal (default)</option>
-                  <option value="anomalous">Anomalous</option>
+                  <option value="nominal">{t.sensorNominal}</option>
+                  <option value="anomalous">{t.sensorAnomalous}</option>
                 </select>
               </label>
             )}
@@ -670,7 +673,7 @@ export default function App() {
                 className="ml-auto px-4 py-3 min-h-[48px] rounded-lg border border-amber-500/60 bg-amber-950/50 hover:bg-amber-900/60 text-amber-100 font-semibold text-sm flex items-center gap-2 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
               >
                 <Gauge className="w-4 h-4" />
-                {isRunningBatch ? 'Running batch...' : t.lineRunBtn}
+                {isRunningBatch ? t.runningBatch : t.lineRunBtn}
               </button>
             )}
           </div>
@@ -703,7 +706,7 @@ export default function App() {
           <section className="rounded-xl border border-indigo-500/60 bg-indigo-950/60 p-4 flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <div className="text-xs font-bold uppercase tracking-wider text-indigo-300">
-                Ground Truth Revealed — {revealed.sample_id}
+                {t.revealHeader} — {revealed.sample_id}
               </div>
               <div className="text-base font-bold text-white">
                 {revealed.label} ({revealed.defect_type}) {revealed.severity !== 'none' ? `• severity: ${revealed.severity}` : ''}
@@ -711,8 +714,8 @@ export default function App() {
             </div>
             <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-900 border border-indigo-400/50 text-indigo-200">
               {Boolean(revealed.is_defect) === (t1?.pass_status === 'ESCALATE')
-                ? '✔ Gate verdict matched ground truth'
-                : '✘ Gate verdict differed from ground truth'}
+                ? t.revealMatched
+                : t.revealDiffered}
             </span>
           </section>
         )}
@@ -734,7 +737,11 @@ export default function App() {
                   </div>
                   <div className="flex flex-wrap gap-2 pt-1">
                     <span className="px-2.5 py-1 rounded-full bg-slate-950/60 text-xs font-semibold">
-                      {tel?.inference_mode === 'LIVE_MODEL' ? 'AI' : 'Rules'}
+                      {tel?.inference_mode === 'LIVE_MODEL'
+                        ? t.sourceAi
+                        : t1?.t1b_vote === 'SKIPPED'
+                        ? t.sourceDsp
+                        : t.sourceRules}
                     </span>
                     {activeIsSimulated && (
                       <span className="px-2.5 py-1 rounded-full bg-slate-950/60 text-xs font-semibold">
@@ -751,7 +758,7 @@ export default function App() {
               <section className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold text-slate-200">
-                    {drawnPart?.sample_id || inspection?.sample_id || 'Uploaded frame'}
+                    {drawnPart?.sample_id || inspection?.sample_id || t.uploadedPhotoTitle}
                   </span>
                   {activeIsSimulated && (
                     <span className="px-2.5 py-1 rounded bg-amber-950 border border-amber-500/50 text-xs font-bold text-amber-200">
@@ -797,7 +804,7 @@ export default function App() {
 
             {/* Push-to-Talk Co-Pilot (Operator View) */}
             <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                   <Volume2 className="w-5 h-5 text-sky-400" />
                   {t.copilotTitle}
@@ -939,7 +946,7 @@ export default function App() {
                           : 'bg-amber-950 text-amber-200 border border-amber-500/60'
                       }`}
                     >
-                      {t1.pass_status}
+                      {t1.pass_status === 'HEALTHY' ? '✓ HEALTHY' : '⚠ ESCALATE'}
                     </span>
                   </div>
                   <div className="text-xs space-y-1.5 text-slate-200">
@@ -949,7 +956,12 @@ export default function App() {
                     </div>
                     <div>
                       <strong>Visual gate ({t1.provenance_t1b?.model_id || t1.provenance_t1b?.producer}):</strong>{' '}
-                      {t1.t1b_vote === 'NOMINAL' ? '✓ NOMINAL' : `⚠ ${t1.t1b_vote}`} ({fmtMs(tel?.t1b_ms)})
+                      {t1.t1b_vote === 'NOMINAL'
+                        ? '✓ NOMINAL'
+                        : t1.t1b_vote === 'SKIPPED'
+                        ? `— SKIPPED (${t1.provenance_t1b?.note || 'bearing not visible; vibration-led'})`
+                        : `⚠ ${t1.t1b_vote}`}{' '}
+                      ({fmtMs(tel?.t1b_ms)})
                     </div>
                     <p className="text-slate-300 pt-1">{t1.escalation_reason}</p>
                   </div>
@@ -1063,10 +1075,10 @@ export default function App() {
                 t1 && (
                   <section className="rounded-xl border border-emerald-700/50 bg-emerald-950/30 p-5 space-y-2">
                     <h2 className="text-base font-bold text-emerald-200">
-                      Short-circuited at Tier-1 (HEALTHY)
+                      Cleared at Tier-1 (HEALTHY — 0 Tier-2 tokens)
                     </h2>
                     <p className="text-sm text-slate-300">
-                      Tier-2 root-cause diagnosis and Tier-3 overlay were skipped (0 Tier-2 tokens used).
+                      Tier-2 root-cause diagnosis and Tier-3 overlay were skipped. Record human RELEASE below to continue production.
                     </p>
                   </section>
                 )
@@ -1163,7 +1175,7 @@ export default function App() {
                 <div className="h-52 overflow-y-auto space-y-2 p-2 rounded-lg bg-slate-950 border border-slate-800">
                   {copilotMessages.length === 0 && (
                     <p className="text-xs text-slate-400 p-2">
-                      Ask a question in EN, हिन्दी, or मराठी grounded in the retrieved SOP.
+                      {t.copilotEmptyHint}
                     </p>
                   )}
                   {copilotMessages.map((m, idx) => (
@@ -1181,7 +1193,7 @@ export default function App() {
                           <span>{m.model}</span>
                           {m.latency_ms !== undefined && <span>• {m.latency_ms} ms</span>}
                           {m.audioMode === 'live-audio' && <span>• Live audio</span>}
-                          {m.audioMode === 'device-tts' && <span>• Text fallback + device TTS</span>}
+                          {m.audioMode === 'device-tts' && <span>• {t.audioBrowserVoice}</span>}
                         </div>
                       )}
                       {m.unverified?.length > 0 && (
@@ -1206,7 +1218,7 @@ export default function App() {
                     type="button"
                     onClick={handleVoicePushToTalk}
                     aria-label={t.pushToTalk}
-                    className={`min-h-[44px] min-w-[44px] rounded-lg flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    className={`min-h-[48px] min-w-[48px] rounded-lg flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                       isListening ? 'bg-rose-500 text-white' : 'bg-slate-800 hover:bg-slate-700 text-sky-300'
                     }`}
                   >
@@ -1217,13 +1229,13 @@ export default function App() {
                     value={copilotInput}
                     onChange={(e) => setCopilotInput(e.target.value)}
                     placeholder={t.askPlaceholder}
-                    className="flex-1 min-h-[44px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+                    className="flex-1 min-h-[48px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
                   />
                   <button
                     type="submit"
                     disabled={isCopilotBusy}
                     aria-label={t.send}
-                    className="px-3.5 min-h-[44px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs"
+                    className="px-4 min-h-[48px] rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs"
                   >
                     <Send className="w-4 h-4" />
                   </button>
@@ -1245,14 +1257,14 @@ export default function App() {
                       </div>
                     </div>
                     <div className="p-2 rounded bg-slate-950 border border-slate-800">
-                      <div className="text-slate-400">Token effect of the gate</div>
+                      <div className="text-slate-400">Token change vs cloud-only</div>
                       <div
                         className={`font-mono font-bold ${
                           lineRunResult.measured_token_saving_pct !== null && lineRunResult.measured_token_saving_pct < 0 ? 'text-amber-300' : 'text-emerald-300'
                         }`}
                       >
                         {lineRunResult.measured_token_saving_pct !== null
-                          ? `${lineRunResult.measured_token_saving_pct > 0 ? '−' : '+'}${Math.abs(lineRunResult.measured_token_saving_pct)}% tokens`
+                          ? `${Math.abs(lineRunResult.measured_token_saving_pct)}% ${lineRunResult.measured_token_saving_pct >= 0 ? 'saved' : 'extra'}`
                           : '—'}
                       </div>
                     </div>
@@ -1283,7 +1295,7 @@ export default function App() {
                 {t.dispositionTitle} — <span className="font-mono text-sky-300">{inspection.incident_id}</span>
               </h2>
               <span className="text-xs text-slate-300">
-                {t.aiRecommends}:{' '}
+                {t.systemRecommends}:{' '}
                 <strong className="text-amber-300">
                   {diag?.recommended_disposition || (t1?.pass_status === 'HEALTHY' ? 'RELEASE' : 'HOLD')}
                 </strong>
@@ -1296,7 +1308,7 @@ export default function App() {
                 <select
                   value={dispRole}
                   onChange={(e) => setDispRole(e.target.value)}
-                  className="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-xs text-white"
+                  className="bg-slate-950 border border-slate-700 rounded-md px-3 py-2 min-h-[48px] text-xs text-white"
                 >
                   <option value="QE">QE</option>
                   <option value="Supervisor">Supervisor</option>
@@ -1307,8 +1319,8 @@ export default function App() {
                 type="text"
                 value={dispNote}
                 onChange={(e) => setDispNote(e.target.value)}
-                placeholder="Optional disposition note..."
-                className="flex-1 min-w-[200px] min-h-[44px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+                placeholder={t.dispositionNotePlaceholder}
+                className="flex-1 min-w-[200px] min-h-[48px] px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
               />
 
               <div className="flex flex-wrap gap-2">
@@ -1318,13 +1330,13 @@ export default function App() {
                     type="button"
                     disabled={isSavingDisp}
                     onClick={() => handleRecordDisposition(dec)}
-                    className={`px-4 py-2.5 min-h-[44px] rounded-lg font-bold text-xs border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
+                    className={`px-4 py-2.5 min-h-[48px] rounded-lg font-bold text-xs border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
                       disposition?.decision === dec
                         ? 'bg-emerald-500 text-slate-950 border-emerald-400'
                         : 'bg-slate-800 hover:bg-slate-700 text-white border-slate-600'
                     }`}
                   >
-                    {dec}
+                    {t.dispositionLabels?.[dec] || dec}
                   </button>
                 ))}
               </div>
@@ -1332,8 +1344,8 @@ export default function App() {
 
             {disposition && (
               <div className="text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-700/50 rounded-lg px-3 py-2">
-                Recorded: <strong>{disposition.decision}</strong> by <strong>{disposition.role}</strong> at{' '}
-                {disposition.recorded_at}
+                {t.recordedPrefix} <strong>{t.dispositionLabels?.[disposition.decision] || disposition.decision}</strong> ({t.recordedBy}{' '}
+                <strong>{disposition.role}</strong>, {t.recordedAt} {disposition.recorded_at})
               </div>
             )}
 
@@ -1344,7 +1356,7 @@ export default function App() {
                   rows={2}
                   value={woNotes}
                   onChange={(e) => setWoNotes(e.target.value)}
-                  placeholder="Enter operator note in English, Hindi, or Marathi (Gemini extracts part_code, priority, spares & SLA risk)..."
+                  placeholder={t.workOrderPlaceholder}
                   className="w-full p-3 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white"
                 />
                 <div className="flex items-center justify-between gap-3">
@@ -1352,9 +1364,9 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={isLoggingWo || !woNotes.trim()}
-                    className="px-5 py-2.5 min-h-[44px] rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm disabled:opacity-50"
+                    className="px-5 py-2.5 min-h-[48px] rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm disabled:opacity-50"
                   >
-                    {isLoggingWo ? 'Logging...' : t.logWorkOrder}
+                    {isLoggingWo ? t.loggingWorkOrder : t.logWorkOrder}
                   </button>
                 </div>
               </form>
@@ -1374,7 +1386,7 @@ export default function App() {
               <p className="text-xs text-slate-400">{t.demoStoreNote}</p>
             </div>
             <div className="text-right">
-              <div className="text-xs text-slate-400">Estimated avoidable loss logged (assumptions)</div>
+              <div className="text-xs text-slate-400">{t.avoidableLossLogged}</div>
               <div className="text-lg font-extrabold font-mono text-emerald-300">
                 ₹{Number(totalAvoidableLoss).toLocaleString('en-IN')}
               </div>
@@ -1382,7 +1394,7 @@ export default function App() {
           </div>
 
           {workOrders.length === 0 ? (
-            <p className="text-xs text-slate-400">No work orders logged yet in this demo session.</p>
+            <p className="text-xs text-slate-400">{t.ledgerEmpty}</p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {workOrders.slice(0, 6).map((wo) => (
@@ -1395,10 +1407,10 @@ export default function App() {
                   </div>
                   <p className="text-slate-200">{wo.operator_notes}</p>
                   <div className="flex flex-wrap gap-2 text-slate-300">
-                    <span>SKU: <strong>{wo.extracted_tags_json?.part_code}</strong></span>
-                    <span>Priority: <strong>{wo.extracted_tags_json?.shift_priority}</strong></span>
+                    <span>{t.skuLabel}: <strong>{wo.extracted_tags_json?.part_code}</strong></span>
+                    <span>{t.priorityLabel}: <strong>{wo.extracted_tags_json?.shift_priority}</strong></span>
                     {wo.sla_critical_flag && (
-                      <span className="text-rose-300 font-bold">SLA RISK</span>
+                      <span className="text-rose-300 font-bold">⚠ {t.slaRiskLabel}</span>
                     )}
                   </div>
                 </div>
@@ -1455,15 +1467,25 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.entries(metricsData.models).map(([m, st]) => (
-                      <tr key={m} className="border-b border-slate-800 font-mono">
-                        <td className="py-1.5 text-sky-300">{m}</td>
-                        <td className="py-1.5 text-emerald-300">{st.ok}</td>
-                        <td className="py-1.5 text-amber-300">{st.fallback}</td>
-                        <td className="py-1.5 text-rose-300">{st.errors}</td>
-                        <td className="py-1.5 text-slate-200">{fmtMs(st.p50_ms)}</td>
-                      </tr>
-                    ))}
+                    {Object.entries(metricsData.models).map(([m, st]) => {
+                      const isDegraded = !m.startsWith('fallback:') && (st.ok + st.errors) >= 5 && st.ok === 0;
+                      return (
+                        <tr key={m} className="border-b border-slate-800 font-mono">
+                          <td className="py-1.5 text-sky-300">
+                            {m}
+                            {isDegraded && (
+                              <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950 border border-rose-500 text-rose-200 font-bold">
+                                ⚠ DEGRADED
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 text-emerald-300">{st.ok}</td>
+                          <td className="py-1.5 text-amber-300">{st.fallback}</td>
+                          <td className="py-1.5 text-rose-300">{st.errors}</td>
+                          <td className="py-1.5 text-slate-200">{fmtMs(st.p50_ms)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : (

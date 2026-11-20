@@ -146,11 +146,19 @@ def _to_jpeg_bytes(raw_bytes: bytes, quality: int = 82) -> tuple[bytes, str]:
         return raw_bytes, "image/png"
 
 
+# Verified on google-genai==1.20.0: gemini-3.5-flash-lite and gemma-4-26b-a4b-it
+# return 400 INVALID_ARGUMENT when thinking_budget=0 is sent; gemini-3.1-flash-lite accepts it.
+_MODELS_SUPPORTING_THINKING_BUDGET_ZERO = frozenset({"gemini-3.1-flash-lite"})
+
+
 def _config_for_model(model_id: str, config: Optional[Any]) -> Optional[Any]:
-    """Strip thinking_config for Gemma models that do not support it."""
+    """Keep thinking_config only for models probed to accept thinking_budget=0."""
     if config is None or genai_types is None:
         return config
-    if model_id.lower().startswith("gemma") and getattr(config, "thinking_config", None) is not None:
+    if (
+        model_id.lower() not in _MODELS_SUPPORTING_THINKING_BUDGET_ZERO
+        and getattr(config, "thinking_config", None) is not None
+    ):
         return config.model_copy(update={"thinking_config": None})
     return config
 

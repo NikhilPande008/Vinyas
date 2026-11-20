@@ -116,3 +116,37 @@ def test_t1b_unavailable_fails_safe_to_escalate():
     )
     assert combined.pass_status == "ESCALATE"
     assert "fail-safe" in combined.escalation_reason.lower()
+
+
+def test_cnc_inspect_skips_t1b_vision_and_lets_dsp_decide():
+    from fastapi.testclient import TestClient
+    from backend.main import app, model_router, rate_limiter
+
+    ensure_dataset()
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    nom_cnc = next(m for m in manifest if m["line"] == "CNC" and m["defect_type"] == "NOMINAL")
+
+    rate_limiter.reset()
+    orig_client = model_router._client
+    calls: list[str] = []
+
+    class _CountingModels:
+        def generate_content(self, model: str, contents, config=None):
+            calls.append(model)
+            raise AssertionError("T1-B vision model must not be called on CNC")
+
+    model_router.set_client(SimpleNamespace(models=_CountingModels()))
+    try:
+        client = TestClient(app)
+        resp = client.post("/api/inspect", json={"sample_id": nom_cnc["sample_id"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tier1_triage"]["pass_status"] == "HEALTHY"
+        assert body["tier1_triage"]["t1b_vote"] == "SKIPPED"
+        t1b_prov = body["tier1_triage"]["provenance_t1b"]
+        assert t1b_prov["producer"] == "SKIPPED"
+        assert t1b_prov["note"] == "bearing not visible; vibration-led"
+        assert body["telemetry"]["t1b_ms"] == 0
+        assert calls == []
+    finally:
+        model_router.set_client(orig_client)

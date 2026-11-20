@@ -1,8 +1,8 @@
 # Live Security Verification (`eval/security_check.md`)
 
 - **Target URL:** https://vinyas-ai-65216244490.asia-south1.run.app
-- **Revision:** `vinyas-ai-00002-cw4`
-- **Timestamp (UTC):** 2026-11-20T16:46:28Z
+- **Revision:** `vinyas-ai-00004-srs`
+- **Timestamp (UTC):** 2026-11-20T18:41:56Z
 
 | Check | Result |
 | --- | --- |
