@@ -7,7 +7,7 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+RUN npm ci || npm install
 COPY frontend/ ./
 RUN npm run build
 
@@ -26,11 +26,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
-# Copy Authentic Google Agent Skills (.agents/skills/), Backend, Edge Client & Built Frontend
 COPY .agents/ /app/.agents/
 COPY backend/ /app/backend/
 COPY edge_client/ /app/edge_client/
 COPY --from=frontend-builder /frontend/dist /app/frontend/dist
+
+# Pre-build the deterministic 60-sample simulated mock-rig dataset at image build time
+RUN python -c "from backend.mock_rig.dataset import build_dataset; build_dataset(seed=2026, force=True)"
 
 EXPOSE 8080
 

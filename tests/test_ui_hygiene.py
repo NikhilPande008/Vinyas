@@ -26,24 +26,7 @@ def test_no_banned_claims_in_live_code():
         *(PROJECT_ROOT / "frontend" / "src").rglob("*.js*"),
         PROJECT_ROOT / "edge_client" / "edge_gateway.py",
     ]
-    # Legacy files deleted in Phase 8 are ignored until Phase 8 removes them
-    legacy_dirs = {"agents", "skills", "models"}
-    legacy_services = {
-        "bigquery_logger.py",
-        "circuit_breaker.py",
-        "gemini_live_service.py",
-        "gemini_omni_service.py",
-        "kms_certificate_service.py",
-        "lyria_synth_service.py",
-        "nanobanana_aoi_service.py",
-        "vector_search_service.py",
-        "simulator_assets.py",
-    }
     for p in paths_to_check:
-        if any(part in legacy_dirs for part in p.parts):
-            continue
-        if p.name in legacy_services:
-            continue
         text = p.read_text(encoding="utf-8")
         m = banned.search(text)
         assert m is None, f"Banned claim '{m.group(0)}' found in {p}"
@@ -51,8 +34,6 @@ def test_no_banned_claims_in_live_code():
 
 def test_no_hardcoded_healthy_scenario_branch():
     for p in [*(PROJECT_ROOT / "backend").rglob("*.py"), PROJECT_ROOT / "edge_client" / "edge_gateway.py"]:
-        if p.name == "simulator_assets.py":
-            continue
         text = p.read_text(encoding="utf-8")
         assert '== "LINE_D_HEALTHY"' not in text, f"Hard-coded LINE_D_HEALTHY branch in {p}"
         assert "== 'LINE_D_HEALTHY'" not in text, f"Hard-coded LINE_D_HEALTHY branch in {p}"
