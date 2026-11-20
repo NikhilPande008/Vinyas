@@ -260,7 +260,7 @@ def render_pillow_visual_sop_overlay(
     scenario_key: str,
     diagnosis: Tier2DiagnosisResult,
     torque_spec: str,
-    model_badge: str = "Nano Banana 2.1 Visual SOP Overlay (SynthID Verified)",
+    model_badge: str = "Deterministic Overlay",
 ) -> str:
     """Render an annotated high-contrast Visual Repair SOP Card (Data URL base64 PNG)."""
     base_img = Image.open(io.BytesIO(raw_image_bytes)).convert("RGB").resize((640, 420))

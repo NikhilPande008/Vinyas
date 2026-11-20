@@ -34,6 +34,7 @@ from backend.schemas import (
     InspectionRequest,
     InspectionResponse,
     SensorTelemetry,
+    StageProvenance,
     TelemetryMetrics,
     WorkOrderCreate,
     WorkOrderRecord,
@@ -95,43 +96,9 @@ app.add_middleware(
 )
 
 
-MODEL_JUSTIFICATION_MATRIX: list[dict[str, str]] = [
-    {
-        "tier": "Tier 1: Edge Anomaly Gate",
-        "model": "Gemma 4 E4B (Edge) / gemini-3.5-flash-lite (Cloud Sandbox Emulator)",
-        "why": "Streaming 24/7 factory camera & 48 kHz acoustic feeds to frontier cloud models destroys unit economics and exposes plant IP.",
-        "exact_use": "Pre-screens every part in <50 ms. Short-circuits Scenario 4 (Healthy Baseline Part) at Tier-1, saving ~95.4% of Tier-2 cloud token spend.",
-    },
-    {
-        "tier": "Tier 2: Multimodal Root-Cause & ScaNN RAG",
-        "model": "gemini-4-hydrogen (Primary) / gemini-3.8-flash (Fallback)",
-        "why": "Complex cross-modal defects require joint reasoning across optical images, vibration harmonics, AlloyDB ScaNN SOPs, and progressive SKILL.md rules.",
-        "exact_use": "Executes ONLY on ESCALATE. Returns strict Pydantic JSON with root cause, matched AlloyDB SOP ID, ordered repair steps, and INR scrap saved.",
-    },
-    {
-        "tier": "Tier 3: Visual Repair SOP Overlay",
-        "model": "gemini-nano-banana-2.1 (Primary) / Pillow Precision Callout Renderer (Fallback)",
-        "why": "Shop-floor operators act 3x faster on visual callout cards overlaid directly onto the defect frame than on dense text manuals.",
-        "exact_use": "Generates an annotated visual repair overlay card with fault bounding boxes, torque specifications, and SynthID provenance.",
-    },
-    {
-        "tier": "Tier 4: Hands-Free Floor Technician Co-Pilot",
-        "model": "gemini-3.8-live (Primary WebSocket) / gemini-3.8-flash (Streaming Fallback)",
-        "why": "Technicians wearing PPE gloves while inspecting CNC spindles or weld cells cannot type long troubleshooting queries.",
-        "exact_use": "Powers `/api/live-copilot` WebSocket & quick-chip voice assistant grounded in the active incident diagnosis and AlloyDB ScaNN SOP.",
-    },
-    {
-        "tier": "Tier 5: In-Database Work Order Enrichment",
-        "model": "AlloyDB Express (PostgreSQL 18) ScaNN + AI.EXTRACT() & AI.IF()",
-        "why": "Eliminates fragile external ETL pipelines when logging maintenance tickets from raw operator floor notes.",
-        "exact_use": "Performs sub-10ms ScaNN cosine vector retrieval on `equipment_sops` and runs `ai.extract()` / `ai.if()` to tag spare part SKUs & OEM SLA risk.",
-    },
-]
-
-
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
-    """Health & readiness endpoint required by Cloud Run and Top Telemetry Bar."""
+    """Health & readiness endpoint with truthful runtime counters and routing config."""
     settings = get_settings()
     skills_status = skill_loader.list_skills_status()
     return {
@@ -141,20 +108,20 @@ async def health_check() -> dict[str, Any]:
         "gcp_project_id": settings.resolved_project_id,
         "region": settings.gcp_location,
         "storage_mode": alloydb_service.storage_mode,
-        "db_ai_mode": alloydb_service.db_ai_mode,
-        "inference_mode": model_router.last_inference_mode,
+        "storage_note": "Demo SQLite store — resets when the server restarts",
         "loaded_skills_count": len(skills_status),
         "skills": skills_status,
-        "models": {
-            "tier1_physical_edge": settings.tier1_edge_physical_model,
-            "tier1_cloud_emulator": settings.tier1_cloud_emulator_model,
-            "tier2_primary": settings.tier2_primary_model,
-            "tier2_fallback": settings.tier2_fallback_model,
-            "tier3_visual_sop": settings.tier3_visual_sop_model,
-            "tier4_live_copilot": settings.tier4_live_copilot_model,
-            "tier5_db_ai": "AlloyDB Express PostgreSQL 18 ScaNN + AI.EXTRACT() + AI.IF()",
-        },
-        "model_justification_matrix": MODEL_JUSTIFICATION_MATRIX,
+        "routing_config": model_router.get_routing_config(),
+        "model_metrics": model_router.metrics.snapshot(),
+    }
+
+
+@app.get("/api/metrics")
+async def get_runtime_metrics() -> dict[str, Any]:
+    """Return per-model call counters and measured p50 latencies since startup."""
+    return {
+        "routing_config": model_router.get_routing_config(),
+        "models": model_router.metrics.snapshot(),
     }
 
 
@@ -199,7 +166,9 @@ async def run_edge_to_cloud_inspection(
     """Execute the 5-stage Edge-to-Cloud inspection pipeline."""
     rate_limiter.check_request(http_request, cost=1)
     t_start = time.perf_counter()
-    scenario_meta = SCENARIO_DEFINITIONS.get(request.scenario_key, SCENARIO_DEFINITIONS["LINE_A_PCB"])
+    scenario_key = request.scenario_key or "LINE_A_PCB"
+    scenario_meta = SCENARIO_DEFINITIONS.get(scenario_key, SCENARIO_DEFINITIONS["LINE_A_PCB"])
+    input_simulated = request.custom_image_base64 is None
 
     sensor_telemetry = request.sensor_telemetry or SensorTelemetry(
         **scenario_meta["sensor_telemetry"]
@@ -215,10 +184,11 @@ async def run_edge_to_cloud_inspection(
                 else f"data:image/png;base64,{b64_clean}"
             )
         except Exception:
-            raw_image_bytes = get_scenario_image_bytes(request.scenario_key)
+            raw_image_bytes = get_scenario_image_bytes(scenario_key)
             raw_image_url = f"/api/assets/{scenario_meta['image_filename']}"
+            input_simulated = True
     else:
-        raw_image_bytes = get_scenario_image_bytes(request.scenario_key)
+        raw_image_bytes = get_scenario_image_bytes(scenario_key)
         raw_image_url = f"/api/assets/{scenario_meta['image_filename']}"
 
     audio_url = (
@@ -227,125 +197,137 @@ async def run_edge_to_cloud_inspection(
         else None
     )
 
-    # STAGE 1: Tier-1 Edge Anomaly Gate (Gemma 4 E4B / gemini-3.5-flash-lite Cloud Emulator)
+    # STAGE 1: Tier-1 Gate
     tier1_result = await model_router.run_tier1_edge_gate(
-        scenario_key=request.scenario_key,
+        scenario_key=scenario_key,
         sensor_telemetry=sensor_telemetry,
         raw_image_bytes=raw_image_bytes,
+        input_simulated=input_simulated,
     )
+    provenance_list: list[StageProvenance] = []
+    if tier1_result.provenance_t1b:
+        provenance_list.append(tier1_result.provenance_t1b)
 
-    # MANDATORY SHORT-CIRCUIT RULE FOR SCENARIO 4 (HEALTHY BASELINE PART)
     if tier1_result.pass_status == "HEALTHY":
-        total_ms = max(tier1_result.edge_latency_ms, int((time.perf_counter() - t_start) * 1000))
+        incident_id = f"INC-PASS-{int(time.time()) % 100000}"
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        in_tok = sum((a.input_tokens or 0) for p in provenance_list for a in p.attempts)
+        out_tok = sum((a.output_tokens or 0) for p in provenance_list for a in p.attempts)
+        inf_mode = "LIVE_MODEL" if any(p.producer in ("MODEL", "FALLBACK_MODEL") for p in provenance_list) else "FALLBACK_RULES"
         await alloydb_service.log_incident(
-            incident_id=f"INC-HEALTHY-{int(time.time()) % 10000}",
-            scenario_key=request.scenario_key,
+            incident_id=incident_id,
+            scenario_key=scenario_key,
             line_name=scenario_meta["line_name"],
             tier1_status="HEALTHY",
-            defect_class="NONE (NOMINAL BASELINE PASS)",
+            defect_class="NONE",
             severity="LOW",
             root_cause=tier1_result.escalation_reason,
             scrap_saved_inr=0,
-            inference_mode=model_router.last_inference_mode,
+            inference_mode=inf_mode,
             latency_ms=total_ms,
         )
         telemetry = TelemetryMetrics(
             tier1_ms=tier1_result.edge_latency_ms,
-            scann_rag_ms=0,
+            t1b_ms=tier1_result.edge_latency_ms,
+            retrieval_ms=0,
             tier2_ms=0,
             tier3_ms=0,
             total_ms=total_ms,
             storage_mode=alloydb_service.storage_mode,
-            db_ai_mode=alloydb_service.db_ai_mode,
-            inference_mode=model_router.last_inference_mode,
-            tier1_model_used=tier1_result.executed_model,
-            tier2_model_used="SHORT_CIRCUITED_AT_EDGE (0 Tokens)",
-            tier3_model_used="SHORT_CIRCUITED_AT_EDGE (0 Tokens)",
+            inference_mode=inf_mode,
+            tier1_model_used=tier1_result.provenance_t1b.model_id if tier1_result.provenance_t1b else None,
+            tier2_model_used=None,
+            tier3_model_used=None,
+            total_input_tokens=in_tok,
+            total_output_tokens=out_tok,
         )
         return InspectionResponse(
-            scenario_key=request.scenario_key,
+            incident_id=incident_id,
+            line=request.line or "PCB",
+            scenario_key=scenario_key,
             line_name=scenario_meta["line_name"],
+            input_simulated=input_simulated,
             raw_image_url=raw_image_url,
             audio_url=audio_url,
             sensor_telemetry=sensor_telemetry,
             tier1_triage=tier1_result,
             matched_sops=[],
-            active_skill_metadata={
-                "name": "none (short-circuited at Tier-1)",
-                "full_body_loaded": False,
-                "tokens_saved_pct": 95.4,
-            },
+            active_skill_metadata={"name": "none", "full_body_loaded": False},
             tier2_diagnosis=None,
             tier3_visual_sop_data_url=None,
-            tier3_render_mode="SHORT_CIRCUITED_HEALTHY",
+            tier3_render_mode=None,
+            provenance=provenance_list,
             telemetry=telemetry,
         )
 
-    # STAGE 2: Progressive Skill Activation + AlloyDB Express ScaNN Vector Retrieval
-    active_skill = skill_loader.activate_skill_for_scenario(request.scenario_key)
-    matched_sops, scann_ms = await alloydb_service.search_sops_scann(
+    # STAGE 2: Skill Activation + SOP Retrieval
+    active_skill = skill_loader.activate_skill_for_scenario(scenario_key)
+    matched_sops, retrieval_ms = await alloydb_service.search_sops_scann(
         query_text=f"{scenario_meta['subtitle']} {tier1_result.escalation_reason}",
-        scenario_key=request.scenario_key,
+        scenario_key=scenario_key,
         limit=3,
     )
-
-    # STAGE 3: Tier-2 Multimodal Root-Cause & ScaNN RAG Diagnosis (gemini-4-hydrogen -> gemini-3.8-flash)
-    diagnosis, tier2_model_used, inference_mode, tier2_ms = (
-        await model_router.run_tier2_multimodal_diagnosis(
-            scenario_key=request.scenario_key,
-            sensor_telemetry=sensor_telemetry,
-            raw_image_bytes=raw_image_bytes,
-            matched_sops=matched_sops,
-            active_skill=active_skill,
+    provenance_list.append(
+        StageProvenance(
+            stage="RETRIEVAL",
+            producer="DETERMINISTIC",
+            model_id=None,
+            latency_ms=retrieval_ms,
+            input_simulated=input_simulated,
         )
     )
 
-    # STAGE 4: Tier-3 Visual Repair SOP Overlay (gemini-nano-banana-2.1 -> Pillow fallback)
-    primary_torque = matched_sops[0].torque_spec if matched_sops else "Standard Calibrated Torque"
-    visual_overlay_url, tier3_model_used, tier3_ms = (
-        await model_router.run_tier3_visual_repair_overlay(
-            raw_image_bytes=raw_image_bytes,
-            scenario_key=request.scenario_key,
-            diagnosis=diagnosis,
-            torque_spec=primary_torque,
-        )
+    # STAGE 3: Tier-2 Multimodal Diagnosis
+    diagnosis, t2_prov = await model_router.run_tier2_multimodal_diagnosis(
+        scenario_key=scenario_key,
+        sensor_telemetry=sensor_telemetry,
+        raw_image_bytes=raw_image_bytes,
+        matched_sops=matched_sops,
+        active_skill=active_skill,
+        input_simulated=input_simulated,
     )
+    provenance_list.append(t2_prov)
 
-    total_ms = max(
-        tier1_result.edge_latency_ms + scann_ms + tier2_ms + tier3_ms,
-        int((time.perf_counter() - t_start) * 1000),
-    )
+    total_ms = int((time.perf_counter() - t_start) * 1000)
+    in_tok = sum((a.input_tokens or 0) for p in provenance_list for a in p.attempts)
+    out_tok = sum((a.output_tokens or 0) for p in provenance_list for a in p.attempts)
+    inf_mode = "LIVE_MODEL" if any(p.producer in ("MODEL", "FALLBACK_MODEL") for p in provenance_list) else "FALLBACK_RULES"
 
     await alloydb_service.log_incident(
         incident_id=diagnosis.incident_id,
-        scenario_key=request.scenario_key,
+        scenario_key=scenario_key,
         line_name=scenario_meta["line_name"],
         tier1_status=tier1_result.pass_status,
-        defect_class=diagnosis.defect_class,
+        defect_class=diagnosis.defect_class or diagnosis.defect_type,
         severity=diagnosis.severity,
         root_cause=diagnosis.root_cause_analysis,
-        scrap_saved_inr=diagnosis.estimated_scrap_saved_inr,
-        inference_mode=inference_mode,
+        scrap_saved_inr=diagnosis.estimated_avoidable_loss_inr,
+        inference_mode=inf_mode,
         latency_ms=total_ms,
     )
 
     telemetry = TelemetryMetrics(
         tier1_ms=tier1_result.edge_latency_ms,
-        scann_rag_ms=scann_ms,
-        tier2_ms=tier2_ms,
-        tier3_ms=tier3_ms,
+        t1b_ms=tier1_result.edge_latency_ms,
+        retrieval_ms=retrieval_ms,
+        tier2_ms=t2_prov.latency_ms,
+        tier3_ms=0,
         total_ms=total_ms,
         storage_mode=alloydb_service.storage_mode,
-        db_ai_mode=alloydb_service.db_ai_mode,
-        inference_mode=inference_mode,
-        tier1_model_used=tier1_result.executed_model,
-        tier2_model_used=tier2_model_used,
-        tier3_model_used=tier3_model_used,
+        inference_mode=inf_mode,
+        tier1_model_used=tier1_result.provenance_t1b.model_id if tier1_result.provenance_t1b else None,
+        tier2_model_used=t2_prov.model_id,
+        tier3_model_used=None,
+        total_input_tokens=in_tok,
+        total_output_tokens=out_tok,
     )
 
     return InspectionResponse(
-        scenario_key=request.scenario_key,
+        incident_id=diagnosis.incident_id,
+        line=request.line or "PCB",
+        scenario_key=scenario_key,
         line_name=scenario_meta["line_name"],
+        input_simulated=input_simulated,
         raw_image_url=raw_image_url,
         audio_url=audio_url,
         sensor_telemetry=sensor_telemetry,
@@ -359,8 +341,9 @@ async def run_edge_to_cloud_inspection(
             "references_loaded": list(active_skill["references"].keys()),
         },
         tier2_diagnosis=diagnosis,
-        tier3_visual_sop_data_url=visual_overlay_url,
-        tier3_render_mode=tier3_model_used,
+        tier3_visual_sop_data_url=None,
+        tier3_render_mode="PENDING_PHASE_4",
+        provenance=provenance_list,
         telemetry=telemetry,
     )
 
@@ -375,14 +358,14 @@ async def create_work_order(payload: WorkOrderCreate) -> WorkOrderRecord:
 async def list_work_orders() -> dict[str, Any]:
     """List persisted work orders and cumulative plant INR savings."""
     orders = await alloydb_service.list_work_orders(limit=25)
-    total_scrap_saved_inr = sum(o.scrap_saved_inr for o in orders)
+    total_avoidable_loss_inr = sum(o.avoidable_loss_inr for o in orders)
     critical_count = sum(1 for o in orders if o.sla_critical_flag)
     return {
         "storage_mode": alloydb_service.storage_mode,
-        "db_ai_mode": alloydb_service.db_ai_mode,
+        "storage_note": "Demo store — resets when the server restarts",
         "total_work_orders": len(orders),
         "critical_sla_count": critical_count,
-        "total_scrap_saved_inr": total_scrap_saved_inr,
+        "total_avoidable_loss_inr": total_avoidable_loss_inr,
         "work_orders": [o.model_dump() for o in orders],
     }
 

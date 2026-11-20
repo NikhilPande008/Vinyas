@@ -142,13 +142,11 @@ class AlloyDBService:
 
     def __init__(self, dsn: Optional[str] = None, sqlite_path: Optional[str] = None) -> None:
         settings = get_settings()
-        self.dsn = (dsn if dsn is not None else settings.alloydb_dsn).strip()
-        self.sqlite_path = sqlite_path or settings.sqlite_fallback_path
+        self.dsn = (dsn if dsn is not None else "").strip()
         self._pool: Any = None
-        self.storage_mode: Literal["ALLOYDB_EXPRESS_SCANN", "LOCAL_SQLITE_FALLBACK"] = (
-            "LOCAL_SQLITE_FALLBACK"
-        )
-        self.db_ai_mode: Literal["ALLOYDB_IN_SQL", "PYTHON_FALLBACK"] = "PYTHON_FALLBACK"
+        self.storage_mode: str = "DEMO_SQLITE"
+        self.db_ai_mode: str = "RULE_BASED"
+        self.sqlite_path = sqlite_path or settings.sqlite_db_path
         self._init_sqlite_fallback()
 
     def _init_sqlite_fallback(self) -> None:
@@ -245,12 +243,12 @@ class AlloyDBService:
                         "WO-PUNE-1001",
                         "INC-CNC-8821",
                         "CNC-MAKINO-A51-CHAKAN",
-                        "Spindle outer-race 4.21 kHz BPFO spall alert on Line B. Replace SP-7014C-P4S front duplex bearing immediately to protect Tata Motors Tier-1 dispatch SLA.",
+                        "Spindle outer-race bearing impact alert on CNC line. Replace SP-7014C-P4S front duplex bearing after QE hold.",
                         json.dumps(seed_tags),
                         1,
-                        "PYTHON_FALLBACK",
+                        "FALLBACK_RULES",
                         "OPEN",
-                        77700,
+                        0,
                         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                     ),
                 )
@@ -506,65 +504,12 @@ class AlloyDBService:
         sla_critical = False
         db_ai_mode: Literal["ALLOYDB_IN_SQL", "PYTHON_FALLBACK"] = "PYTHON_FALLBACK"
 
-        if self.storage_mode == "ALLOYDB_EXPRESS_SCANN" and self._pool is not None:
-            try:
-                async with self._pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        """
-                        SELECT
-                            ai.extract($1::text, ARRAY['part_code', 'shift_priority', 'required_spares']) AS extracted_tags,
-                            ai.if('Does this maintenance ticket indicate an urgent line stoppage, defect reject, or OEM SLA risk? Ticket: ' || $1::text) AS sla_flag
-                        """,
-                        payload.operator_notes,
-                    )
-                    if row and row["extracted_tags"]:
-                        raw_tags = (
-                            json.loads(row["extracted_tags"])
-                            if isinstance(row["extracted_tags"], str)
-                            else dict(row["extracted_tags"])
-                        )
-                        spares_val = raw_tags.get("required_spares") or ["Standard Maintenance Kit"]
-                        if isinstance(spares_val, str):
-                            spares_val = [spares_val]
-                        tags = ExtractedWorkOrderTags(
-                            part_code=str(raw_tags.get("part_code") or "SP-OEM-STD"),
-                            shift_priority=str(raw_tags.get("shift_priority") or "P1_IMMEDIATE"),
-                            required_spares=list(spares_val),
-                        )
-                        sla_critical = bool(row["sla_flag"])
-                        db_ai_mode = "ALLOYDB_IN_SQL"
-            except Exception:
-                tags = None
-
-        if tags is None:
-            tags, sla_critical = self._python_fallback_extract_and_if(
-                payload.operator_notes,
-                payload.scenario_key or "LINE_A_PCB",
-            )
-            db_ai_mode = "PYTHON_FALLBACK"
-
-        self.db_ai_mode = db_ai_mode
-
-        if self.storage_mode == "ALLOYDB_EXPRESS_SCANN" and self._pool is not None:
-            try:
-                async with self._pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO work_orders
-                        (id, incident_id, machine_id, operator_notes, extracted_tags_json, sla_critical_flag, db_ai_mode, status, scrap_saved_inr)
-                        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'OPEN', $8)
-                        """,
-                        wo_id,
-                        payload.incident_id,
-                        payload.machine_id,
-                        payload.operator_notes,
-                        json.dumps(tags.model_dump()),
-                        sla_critical,
-                        db_ai_mode,
-                        payload.scrap_saved_inr,
-                    )
-            except Exception:
-                self.storage_mode = "LOCAL_SQLITE_FALLBACK"
+        tags, sla_critical = self._python_fallback_extract_and_if(
+            payload.operator_notes,
+            payload.line or "PCB",
+        )
+        extraction_producer = "FALLBACK_RULES"
+        self.db_ai_mode = extraction_producer
 
         conn = sqlite3.connect(self.sqlite_path)
         try:
@@ -582,8 +527,8 @@ class AlloyDBService:
                     payload.operator_notes,
                     json.dumps(tags.model_dump()),
                     1 if sla_critical else 0,
-                    db_ai_mode,
-                    payload.scrap_saved_inr,
+                    extraction_producer,
+                    payload.avoidable_loss_inr,
                     created_at,
                 ),
             )
@@ -598,9 +543,10 @@ class AlloyDBService:
             operator_notes=payload.operator_notes,
             extracted_tags_json=tags,
             sla_critical_flag=sla_critical,
-            db_ai_mode=db_ai_mode,
+            extraction_producer=extraction_producer,
+            extraction_model_id=None,
             status="OPEN",
-            scrap_saved_inr=payload.scrap_saved_inr,
+            avoidable_loss_inr=payload.avoidable_loss_inr,
             created_at=created_at,
         )
 
@@ -684,9 +630,10 @@ class AlloyDBService:
                     operator_notes=operator_notes,
                     extracted_tags_json=ExtractedWorkOrderTags(**tags_dict),
                     sla_critical_flag=bool(sla_flag),
-                    db_ai_mode=db_ai_mode if db_ai_mode in ("ALLOYDB_IN_SQL", "PYTHON_FALLBACK") else "PYTHON_FALLBACK",
+                    extraction_producer=str(db_ai_mode or "FALLBACK_RULES"),
+                    extraction_model_id=None,
                     status=status,
-                    scrap_saved_inr=int(scrap_saved_inr or 0),
+                    avoidable_loss_inr=int(scrap_saved_inr or 0),
                     created_at=created_at,
                 )
             )

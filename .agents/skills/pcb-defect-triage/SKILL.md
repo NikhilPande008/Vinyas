@@ -1,19 +1,20 @@
 ---
 name: pcb-defect-triage
-description: Diagnoses automotive SMT PCB assembly anomalies including fine-pitch QFP solder bridges, tombstoning, cold solder joints, and BGA thermal voiding under IPC-A-610 Class 3 automotive standards. Trigger this skill when scenario_key is LINE_A_PCB or when inspecting optical PCB surface-mount assembly defects.
+description: Diagnoses automotive SMT PCB assembly anomalies including fine-pitch QFP solder bridges, insufficient solder, and cosmetic flux residue glare under IPC-A-610 Class 3 automotive acceptability standards.
 ---
 
 # Automotive PCB Defect Triage (`pcb-defect-triage`)
 
 ## Domain Scope
-Applies to Pune Tier-2/3 automotive electronic control unit (ECU), BMS, and cluster PCB SMT reflow lines operating under **IPC-A-610 Class 3 (High-Performance/Automotive)** tolerances.
+Applies to automotive ECU/BMS SMT reflow lines operating under **IPC-A-610 Class 3** acceptability criteria for SAC305 lead-free assemblies.
 
 ## Diagnostic Workflow
-1. **Optical Callout Localization:** Identify bridging across fine-pitch leads (`<= 0.5 mm` pitch QFP/SOIC), insufficient wetting, or solder ball spatter.
-2. **Root-Cause Correlation:**
-   - **Solder Bridge across QFP Pins:** Check stencil aperture paste release, squeegee pressure (`> 1.2 kg/cm`), or reflow preheat ramp rate exceeding `2.5 °C/sec` causing flux outgassing slump.
-   - **Tombstoning / Manhattan Effect:** Check uneven thermal mass across passive pads or pick-and-place nozzle Z-axis offset.
-3. **Prescribed Rework & Line Action:**
-   - Isolate affected PCB lot and perform hot-air/micro-iron desoldering wick rework with no-clean ROL0 flux.
-   - Inspect under 20x stereo microscope to confirm minimum `0.15 mm` electrical clearance.
-   - Trigger underside stencil wipe cycle and recalibrate reflow Zone 3–5 thermal profile (`242 °C` peak, `55 sec` Time Above Liquidus).
+1. **Optical Inspection:**
+   - **Solder Bridge (`SOLDER_BRIDGE`):** Conductive solder fillet connecting two or more adjacent fine-pitch QFP leads. Correlate with reflow preheat ramp (`> 3.0 °C/s` outside `1.0–3.0 °C/s` SAC305 window) or stencil underside paste slump.
+   - **Insufficient Solder (`INSUFFICIENT_SOLDER`):** Starved heel/toe fillet on one or more QFP pads.
+   - **Flux Residue Glare (Hard Negative):** Specular sheen between leads without conductive solder bridging — acceptable if continuity/clearance is intact.
+2. **Prescribed Rework & Line Action (Human-Approved):**
+   - Recommend QE hold and ESD rework station inspection.
+   - Apply ROL0 no-clean flux and wick excess SAC305 solder using `1.0 mm` copper desoldering braid at `330 °C`.
+   - Verify `> 0.15 mm` inter-lead clearance at `20x` microscope inspection.
+   - Trigger stencil underside vacuum wipe and bring reflow profile within SAC305 window (`1–3 °C/s` preheat ramp, `235–250 °C` peak, `45–90 s` Time Above Liquidus).
