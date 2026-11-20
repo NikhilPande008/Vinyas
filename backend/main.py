@@ -18,16 +18,26 @@ from contextlib import asynccontextmanager
 import json
 import time
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from backend.config import PROJECT_ROOT, get_settings
 from backend.db.alloydb_service import AlloyDBService
+from backend.mock_rig.dataset import (
+    LINE_DEFINITIONS,
+    MANIFEST_PATH,
+    SAMPLES_DIR,
+    draw_random_sample,
+    ensure_dataset,
+    load_sample_public,
+)
 from backend.schemas import (
     CopilotChatRequest,
     CopilotChatResponse,
@@ -41,13 +51,6 @@ from backend.schemas import (
 )
 from backend.services.model_router import GoogleModelRouter
 from backend.services.rate_limiter import TokenBucketRateLimiter
-from backend.services.simulator_assets import (
-    ASSETS_DIR,
-    SCENARIO_DEFINITIONS,
-    ensure_simulator_assets,
-    get_scenario_image_bytes,
-    get_scenarios_list,
-)
 from backend.services.skill_loader import get_skill_loader
 
 
@@ -56,20 +59,18 @@ model_router = GoogleModelRouter()
 skill_loader = get_skill_loader()
 rate_limiter = TokenBucketRateLimiter(capacity=30, window_seconds=600)
 
+# Tracks sample_ids inspected in this server session so /api/rig/reveal only unlocks post-inspection
+_inspected_samples: set[str] = set()
+_SAMPLE_ID_RE = re.compile(r"^(PCB|CNC|WELD)-\d{4}$")
 
-def _allowed_asset_filenames() -> set[str]:
-    allowed: set[str] = set()
-    for meta in SCENARIO_DEFINITIONS.values():
-        if meta.get("image_filename"):
-            allowed.add(Path(str(meta["image_filename"])).name)
-        if meta.get("audio_filename"):
-            allowed.add(Path(str(meta["audio_filename"])).name)
-    return allowed
+
+class DrawRequest(BaseModel):
+    line: str = "PCB"
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    ensure_simulator_assets()
+    ensure_dataset()
     skill_loader.discover_metadata_only()
     await alloydb_service.initialize()
     yield
@@ -125,10 +126,72 @@ async def get_runtime_metrics() -> dict[str, Any]:
     }
 
 
-@app.get("/api/scenarios")
-async def list_scenarios() -> dict[str, Any]:
-    """Return the 4 Virtual Factory Line Simulator scenarios."""
-    return {"scenarios": get_scenarios_list()}
+@app.get("/api/lines")
+async def list_lines() -> dict[str, Any]:
+    """Return the three simulated production lines with machine metadata (no verdicts)."""
+    ensure_dataset()
+    return {"lines": list(LINE_DEFINITIONS.values())}
+
+
+@app.post("/api/rig/draw")
+async def draw_part(req: DrawRequest) -> dict[str, Any]:
+    """Draw a random simulated part for a line. Never returns ground-truth labels."""
+    line = req.line.upper()
+    if line not in LINE_DEFINITIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown line '{req.line}'. Use PCB, CNC, or WELD.")
+    sample = draw_random_sample(line)
+    sid = sample["sample_id"]
+    return {
+        "sample_id": sid,
+        "line": line,
+        "machine_id": sample["machine_id"],
+        "part_sku": sample["part_sku"],
+        "frame_url": f"/api/rig/sample/{sid}/frame.png",
+        "wav_url": f"/api/rig/sample/{sid}/vib.wav" if sample["has_wav"] else None,
+        "telemetry": sample["telemetry"],
+        "input_simulated": True,
+    }
+
+
+@app.get("/api/rig/sample/{sample_id}/{filename}")
+async def serve_rig_sample_file(sample_id: str, filename: str):
+    """Serve allow-listed simulated sample files (`frame.png` or `vib.wav`)."""
+    if not _SAMPLE_ID_RE.match(sample_id):
+        raise HTTPException(status_code=404, detail="Sample not found")
+    if filename not in {"frame.png", "vib.wav"}:
+        raise HTTPException(status_code=404, detail="File not found")
+    ensure_dataset()
+    samples_root = SAMPLES_DIR.resolve()
+    target = (samples_root / sample_id / filename).resolve()
+    if not target.is_relative_to(samples_root) or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = "audio/wav" if filename.endswith(".wav") else "image/png"
+    return FileResponse(target, media_type=media_type)
+
+
+@app.get("/api/rig/reveal/{sample_id}")
+async def reveal_ground_truth(
+    sample_id: str,
+    eval_mode: int = Query(default=0, alias="eval"),
+    x_eval_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Reveal ground-truth label ONLY after the sample was inspected (or with eval token)."""
+    if not _SAMPLE_ID_RE.match(sample_id):
+        raise HTTPException(status_code=404, detail="Sample not found")
+    settings = get_settings()
+    eval_authorized = (eval_mode == 1) and (x_eval_token == settings.eval_token)
+    if sample_id not in _inspected_samples and not eval_authorized:
+        raise HTTPException(
+            status_code=403,
+            detail="Inspect this sample first before revealing ground truth.",
+        )
+    if not MANIFEST_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    for entry in manifest:
+        if entry["sample_id"] == sample_id:
+            return entry
+    raise HTTPException(status_code=404, detail="Sample not found in manifest")
 
 
 @app.get("/api/skills")
@@ -141,21 +204,33 @@ async def list_skills() -> dict[str, Any]:
 
 
 @app.get("/api/assets/{filename}")
-async def serve_simulator_asset(filename: str):
-    """Serve allow-listed simulator PNGs and WAV audio."""
-    ensure_simulator_assets()
-    decoded = unquote(filename)
-    if ".." in decoded or "/" in decoded or "\\" in decoded:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    safe_name = Path(decoded).name
-    if safe_name not in _allowed_asset_filenames():
-        raise HTTPException(status_code=404, detail="Asset not found")
-    assets_root = ASSETS_DIR.resolve()
-    target = (assets_root / safe_name).resolve()
-    if not target.is_relative_to(assets_root) or not target.is_file():
-        raise HTTPException(status_code=404, detail="Asset not found")
-    media_type = "audio/wav" if safe_name.endswith(".wav") else "image/png"
-    return FileResponse(target, media_type=media_type)
+async def serve_legacy_asset(filename: str):
+    """Legacy asset endpoint disabled; use /api/rig/sample/{sample_id}/{filename}."""
+    raise HTTPException(status_code=404, detail="Asset not found")
+
+
+def _default_nominal_telemetry(line: str) -> SensorTelemetry:
+    if line == "CNC":
+        return SensorTelemetry(vibration_khz=0.09, vibration_rms_mms=0.9, temperature_c=41.0, line_speed_rpm=5400)
+    if line == "WELD":
+        return SensorTelemetry(
+            vibration_khz=0.8,
+            vibration_rms_mms=1.3,
+            temperature_c=270.0,
+            line_speed_rpm=1850,
+            shielding_gas_lpm=17.0,
+            arc_voltage_v=22.0,
+            wire_feed_m_per_min=8.5,
+        )
+    return SensorTelemetry(
+        vibration_khz=0.35,
+        vibration_rms_mms=0.7,
+        temperature_c=242.0,
+        line_speed_rpm=1200,
+        reflow_ramp_c_per_s=2.0,
+        reflow_peak_c=242.0,
+        reflow_tal_s=65.0,
+    )
 
 
 @app.post("/api/inspect", response_model=InspectionResponse)
@@ -163,39 +238,58 @@ async def run_edge_to_cloud_inspection(
     request: InspectionRequest,
     http_request: Request,
 ) -> InspectionResponse:
-    """Execute the 5-stage Edge-to-Cloud inspection pipeline."""
+    """Execute the inspection pipeline on a drawn mock-rig sample or uploaded image."""
     rate_limiter.check_request(http_request, cost=1)
     t_start = time.perf_counter()
-    scenario_key = request.scenario_key or "LINE_A_PCB"
-    scenario_meta = SCENARIO_DEFINITIONS.get(scenario_key, SCENARIO_DEFINITIONS["LINE_A_PCB"])
-    input_simulated = request.custom_image_base64 is None
 
-    sensor_telemetry = request.sensor_telemetry or SensorTelemetry(
-        **scenario_meta["sensor_telemetry"]
-    )
+    # Resolve line and sample inputs WITHOUT ever reading manifest.json
+    sample_id = request.sample_id
+    wav_path: Path | None = None
+    verdict_note: str | None = None
 
     if request.custom_image_base64:
+        line = (request.line or "PCB").upper()
+        if line not in LINE_DEFINITIONS:
+            line = "PCB"
+        input_simulated = False
         b64_clean = request.custom_image_base64.split(",")[-1]
         try:
             raw_image_bytes = base64.b64decode(b64_clean)
-            raw_image_url = (
-                request.custom_image_base64
-                if request.custom_image_base64.startswith("data:")
-                else f"data:image/png;base64,{b64_clean}"
-            )
-        except Exception:
-            raw_image_bytes = get_scenario_image_bytes(scenario_key)
-            raw_image_url = f"/api/assets/{scenario_meta['image_filename']}"
-            input_simulated = True
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid base64 image") from exc
+        raw_image_url = (
+            request.custom_image_base64
+            if request.custom_image_base64.startswith("data:")
+            else f"data:image/png;base64,{b64_clean}"
+        )
+        sensor_telemetry = request.sensor_telemetry or _default_nominal_telemetry(line)
+        audio_url = None
+        verdict_note = "Uploaded image: verdict is driven by the visual gate (plus user-selected telemetry)."
     else:
-        raw_image_bytes = get_scenario_image_bytes(scenario_key)
-        raw_image_url = f"/api/assets/{scenario_meta['image_filename']}"
+        if sample_id:
+            if not _SAMPLE_ID_RE.match(sample_id):
+                raise HTTPException(status_code=400, detail="Invalid sample_id format")
+            try:
+                sample = load_sample_public(sample_id)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        else:
+            line_hint = (request.line or "PCB").upper()
+            if line_hint not in LINE_DEFINITIONS:
+                line_hint = "PCB"
+            sample = draw_random_sample(line_hint)
+            sample_id = sample["sample_id"]
+        line = sample["line"]
+        input_simulated = True
+        raw_image_bytes = Path(sample["frame_path"]).read_bytes()
+        raw_image_url = f"/api/rig/sample/{sample_id}/frame.png"
+        audio_url = f"/api/rig/sample/{sample_id}/vib.wav" if sample["has_wav"] else None
+        wav_path = Path(sample["wav_path"]) if sample.get("wav_path") else None
+        sensor_telemetry = request.sensor_telemetry or SensorTelemetry(**sample["telemetry"])
+        _inspected_samples.add(sample_id)
 
-    audio_url = (
-        f"/api/assets/{scenario_meta['audio_filename']}"
-        if scenario_meta.get("audio_filename")
-        else None
-    )
+    line_meta = LINE_DEFINITIONS[line]
+    scenario_key = f"LINE_{line}"
 
     # STAGE 1: Tier-1 Gate
     tier1_result = await model_router.run_tier1_edge_gate(
@@ -217,7 +311,7 @@ async def run_edge_to_cloud_inspection(
         await alloydb_service.log_incident(
             incident_id=incident_id,
             scenario_key=scenario_key,
-            line_name=scenario_meta["line_name"],
+            line_name=line_meta["line_name"],
             tier1_status="HEALTHY",
             defect_class="NONE",
             severity="LOW",
@@ -243,10 +337,12 @@ async def run_edge_to_cloud_inspection(
         )
         return InspectionResponse(
             incident_id=incident_id,
-            line=request.line or "PCB",
+            line=line,
             scenario_key=scenario_key,
-            line_name=scenario_meta["line_name"],
+            sample_id=sample_id,
+            line_name=line_meta["line_name"],
             input_simulated=input_simulated,
+            verdict_note=verdict_note,
             raw_image_url=raw_image_url,
             audio_url=audio_url,
             sensor_telemetry=sensor_telemetry,
@@ -263,7 +359,7 @@ async def run_edge_to_cloud_inspection(
     # STAGE 2: Skill Activation + SOP Retrieval
     active_skill = skill_loader.activate_skill_for_scenario(scenario_key)
     matched_sops, retrieval_ms = await alloydb_service.search_sops_scann(
-        query_text=f"{scenario_meta['subtitle']} {tier1_result.escalation_reason}",
+        query_text=f"{line_meta['line_name']} {tier1_result.escalation_reason}",
         scenario_key=scenario_key,
         limit=3,
     )
@@ -296,7 +392,7 @@ async def run_edge_to_cloud_inspection(
     await alloydb_service.log_incident(
         incident_id=diagnosis.incident_id,
         scenario_key=scenario_key,
-        line_name=scenario_meta["line_name"],
+        line_name=line_meta["line_name"],
         tier1_status=tier1_result.pass_status,
         defect_class=diagnosis.defect_class or diagnosis.defect_type,
         severity=diagnosis.severity,
@@ -324,10 +420,12 @@ async def run_edge_to_cloud_inspection(
 
     return InspectionResponse(
         incident_id=diagnosis.incident_id,
-        line=request.line or "PCB",
+        line=line,
         scenario_key=scenario_key,
-        line_name=scenario_meta["line_name"],
+        sample_id=sample_id,
+        line_name=line_meta["line_name"],
         input_simulated=input_simulated,
+        verdict_note=verdict_note,
         raw_image_url=raw_image_url,
         audio_url=audio_url,
         sensor_telemetry=sensor_telemetry,
