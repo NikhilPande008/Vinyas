@@ -20,11 +20,16 @@ from backend.config import PROJECT_ROOT
 
 SKILLS_ROOT = PROJECT_ROOT / ".agents" / "skills"
 
-SCENARIO_TO_SKILL_MAP = {
+LINE_TO_SKILL_MAP = {
+    "PCB": "pcb-defect-triage",
+    "CNC": "bearing-acoustic-diagnostics",
+    "WELD": "maintenance-work-order",
+    "LINE_PCB": "pcb-defect-triage",
+    "LINE_CNC": "bearing-acoustic-diagnostics",
+    "LINE_WELD": "maintenance-work-order",
     "LINE_A_PCB": "pcb-defect-triage",
     "LINE_B_CNC": "bearing-acoustic-diagnostics",
     "LINE_C_WELD": "maintenance-work-order",
-    "LINE_D_HEALTHY": "ops-db-guardrails",
 }
 
 
@@ -107,10 +112,19 @@ class ProgressiveSkillLoader:
             for desc in self._registry.values()
         ]
 
-    def activate_skill_for_scenario(self, scenario_key: str) -> dict[str, Any]:
-        """Stage 2: Dynamically load full `SKILL.md` + `references/*.md` on demand."""
-        skill_name = SCENARIO_TO_SKILL_MAP.get(scenario_key, "maintenance-work-order")
+    def activate_skill_for_line(self, line: str, t1a_flags: list[str] | None = None) -> dict[str, Any]:
+        """Stage 2: Deterministically select and load full `SKILL.md` + `references/*.md` on demand."""
+        flags = t1a_flags or []
+        if "BEARING_PERIODIC_IMPACT" in flags or "VIBRATION_ZONE_C_OR_D" in flags:
+            skill_name = "bearing-acoustic-diagnostics"
+        elif "SHIELDING_GAS_LOW" in flags:
+            skill_name = "maintenance-work-order"
+        else:
+            skill_name = LINE_TO_SKILL_MAP.get(line.upper(), "maintenance-work-order")
         return self.load_full_skill(skill_name)
+
+    def activate_skill_for_scenario(self, scenario_key: str) -> dict[str, Any]:
+        return self.activate_skill_for_line(scenario_key)
 
     def load_full_skill(self, skill_name: str) -> dict[str, Any]:
         """Load full markdown body and reference files for a specific skill."""

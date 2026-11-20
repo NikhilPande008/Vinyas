@@ -31,31 +31,25 @@ class Settings(BaseSettings):
     )
     gcp_project_id: str = Field(default="", validation_alias="GCP_PROJECT_ID")
     gcp_location: str = Field(default="asia-south1", validation_alias="GCP_LOCATION")
-    alloydb_dsn: str = Field(default="", validation_alias="ALLOYDB_DSN")
-    gcs_bucket: str = Field(default="", validation_alias="GCS_BUCKET")
-    demo_fallback_enabled: bool = Field(
-        default=True,
-        validation_alias="DEMO_FALLBACK_ENABLED",
-    )
+    eval_token: str = Field(default="vinyas-eval-local", validation_alias="VINYAS_EVAL_TOKEN")
 
-    # Local SQLite fallback path for resilient zero-crash execution
-    sqlite_fallback_path: str = Field(
+    # Local SQLite demo store path (resets when Cloud Run container restarts)
+    sqlite_db_path: str = Field(
         default=str(PROJECT_ROOT / "vinyas_local.db"),
-        validation_alias="SQLITE_FALLBACK_PATH",
+        validation_alias="SQLITE_DB_PATH",
     )
 
-    # Exact Multi-Tier Google AI Model Identifiers
-    tier1_edge_physical_model: str = "gemma4:e4b"
-    tier1_cloud_emulator_model: str = "gemini-3.5-flash-lite"
-    tier2_primary_model: str = "gemini-4-hydrogen"
+    # Verified Google AI model routing configuration (see eval/model_selection.md)
+    tier1_visual_gate_model: str = "gemma-4-26b-a4b-it"
+    tier1_fallback_model: str = "gemini-3.1-flash-lite"
+    tier2_primary_model: str = "gemini-3.1-flash-lite"
     tier2_fallback_model: str = "gemini-3.8-flash"
-    tier3_visual_sop_model: str = "gemini-nano-banana-2.1"
+    tier2_hedge_delay_sec: float = 6.0
     tier4_live_copilot_model: str = "gemini-3.8-live"
-
-    # Runtime SDK compatible fast live execution aliases when a preview tier returns 503/429
-    sdk_flash_lite_alias: str = "gemini-3.1-flash-lite"
-    sdk_flash_alias: str = "gemini-3.5-flash-lite"
-    sdk_image_alias: str = "gemini-3.1-flash-image"
+    tier4_fallback_model: str = "gemini-3.1-flash-lite"
+    embedding_model: str = "gemini-embedding-2"
+    embedding_dim: int = 768
+    wo_extract_model: str = "gemini-3.1-flash-lite"
 
     @property
     def resolved_project_id(self) -> str:
