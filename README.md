@@ -81,6 +81,7 @@ Component benchmarks (decision rules fixed before each run):
 - **DSP gate alone, all 60 parts, no API:** `19/21` defects flagged, `0/39` false flags; the 2 misses are PCB defects with in-window reflow telemetry that only the camera can see ([eval/dsp_gate_calibration.md](eval/dsp_gate_calibration.md)).
 - **Visual gate, 46 frames in upload mode:** `gemini-3.5-flash-lite` caught `14/14` visible defects with `0/32` false alarms ([eval/visual_gate_benchmark.md](eval/visual_gate_benchmark.md)).
 - **Tier-2, 8 defect samples:** `gemini-3.1-flash-lite` and `gemini-3.5-flash-lite` both `6/8`; `gemini-3.8-flash` had no quota ([eval/model_selection.md](eval/model_selection.md)).
+- **Live Cloud Run verification (`vinyas-ai-00003-87m`):** `9/9` blind draws accurate (including `WRENCH_STRIKE` rejection), `6/6` custom upload checks accurate across PCB/WELD/CNC, `3/3` `gemini-3.8-live` audio turns live in EN/HI/MR (`6.7–7.3 s`), `400 -> 200` disposition gating + live Hindi WO extraction, `p50 = 7.27 s` ([eval/live_verification.md](eval/live_verification.md)).
 
 ---
 
