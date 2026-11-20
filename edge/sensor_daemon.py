@@ -20,10 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
+import httpx
 from scipy.io import wavfile
 from config.settings import settings
 from edge.hardware_relay import HardwareRelayController
 from edge.hilbert_envelope_dsp import stage_a_deterministic_fast_path
+from edge.gemma_guardian import evaluate_transient_window
 
 try:
     import sounddevice as sd  # type: ignore
@@ -101,9 +103,76 @@ class StereoSensorDaemon:
             "tool_id": "T03",
             "pass_type": "FINISHING",
         }
+        self.cloud_run_backend_url: Optional[str] = settings.CLOUD_RUN_BACKEND_URL
+        self.local_backend_url: str = settings.BACKEND_API_URL
+        self.windows_processed: int = 0
+        self.windows_edge_suppressed: int = 0
+        self.windows_cloud_escalated: int = 0
+
+    def resolve_active_backend_url(self) -> str:
+        """Returns live CLOUD_RUN_BACKEND_URL when configured, with automatic fallback to http://localhost:8000."""
+        if self.cloud_run_backend_url and self.cloud_run_backend_url.strip():
+            return self.cloud_run_backend_url.strip().rstrip("/")
+        return self.local_backend_url.strip().rstrip("/")
+
+    def escalate_incident_to_cloud_run(self, stage_a_result: dict) -> Optional[dict]:
+        """
+        Escalates ONLY compressed incident bundles (never raw 48 kHz audio) to
+        `CLOUD_RUN_BACKEND_URL` (with automatic fallback to `http://localhost:8000`)
+        when local similarity < 0.88 or a sustained chatter anomaly occurs.
+        """
+        triage = evaluate_transient_window(
+            {
+                "ae_rms": stage_a_result.get("ae_rms_g", 2.84),
+                "ct_ripple_std": stage_a_result.get("ct_ripple_std_amps", 0.46),
+                "peak_coherence": stage_a_result.get("coherence", 0.84),
+                "machine_context": self.active_machine_context,
+            }
+        )
+        if not triage.get("escalate_to_cloud", True):
+            return None
+
+        payload = {
+            "event_id": f"evt_edge_{int(time.time() * 1000)}",
+            "cycle_id": self.active_machine_context.get("cycle_id", "CYC_CHAKAN_04_99281"),
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "machine_id": self.active_machine_context.get("machine_id", "FANUC_0iTF_CHAKAN_04"),
+            "work_order_id": self.active_machine_context.get("work_order_id", "WO_ALSI9CU3_DIFF_882"),
+            "active_tool_id": self.active_machine_context.get("tool_id", "T03"),
+            "stage_a_dsp_telemetry": {
+                "cycle_id": self.active_machine_context.get("cycle_id", "CYC_CHAKAN_04_99281"),
+                "stage_a_state": stage_a_result.get("stage_a_state", "YELLOW_M01_HOLD"),
+                "execution_latency_ms": float(stage_a_result.get("latency_ms", 1.12)),
+                "ae_rms_g": float(stage_a_result.get("ae_rms_g", 2.84)),
+                "ct_ripple_std_amps": float(stage_a_result.get("ct_ripple_std_amps", 0.46)),
+                "band_power_ratio_2k_8k": float(stage_a_result.get("band_power_ratio_2k_8k", 0.71)),
+                "spectral_crest_factor": float(stage_a_result.get("spectral_crest_factor", 8.2)),
+                "hilbert_envelope_coherence": float(stage_a_result.get("coherence", 0.84)),
+                "dominant_carrier_freq_hz": 4210.0,
+                "modulation_sideband_hz": 68.5,
+            },
+            "stage_b_gemma_triage": triage,
+        }
+
+        candidate_urls = []
+        if self.cloud_run_backend_url and self.cloud_run_backend_url.strip():
+            candidate_urls.append(self.cloud_run_backend_url.strip().rstrip("/"))
+        local_url = self.local_backend_url.strip().rstrip("/")
+        if local_url not in candidate_urls:
+            candidate_urls.append(local_url)
+
+        for target_url in candidate_urls:
+            try:
+                with httpx.Client(timeout=2.5) as client:
+                    resp = client.post(f"{target_url}/api/v1/incidents/process", json=payload)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.debug("Cloud escalation endpoint %s unreachable (%s); trying fallback", target_url, exc)
+        return None
 
     def process_window(self, stereo_window: np.ndarray) -> dict:
-        """Processes a single (12000, 2) stereo chunk through Stage A."""
+        """Processes a single (12000, 2) stereo chunk through Stage A strictly locally on the edge."""
         if stereo_window.shape != (self.chunk_samples, 2):
             raise ValueError(f"Expected shape ({self.chunk_samples}, 2), got {stereo_window.shape}")
 
@@ -113,7 +182,15 @@ class StereoSensorDaemon:
             gemma_triage_queue=self.gemma_triage_queue,
             machine_context=self.active_machine_context,
         )
+        self.windows_processed += 1
+        if res["stage_a_state"] in ("YELLOW_M01_HOLD", "RED_PREEMPT"):
+            self.windows_cloud_escalated += 1
+            res["routing_decision"] = "ESCALATED_TO_CLOUD_RUN"
+        else:
+            self.windows_edge_suppressed += 1
+            res["routing_decision"] = "EDGE_SUPPRESSED_NOMINAL"
         res["source"] = self.active_source_label
+        res["target_backend_url"] = self.resolve_active_backend_url()
         self.latest_result = res
         if self.callback:
             self.callback(res)

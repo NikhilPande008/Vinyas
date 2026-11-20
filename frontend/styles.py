@@ -489,6 +489,229 @@ div.stButton > button[kind="primary"]:hover {
     transform: translateY(-1px);
 }
 
+/* ============================================================================
+   ISA-101 HIGH-PERFORMANCE HMI OPERATOR SCREEN (3-Second Glanceable)
+   Flat neutral dark slate (#0F172A) base; color ONLY for actionable anomalies
+   ============================================================================ */
+.isa101-top-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 72px;
+    min-height: 72px;
+    background-color: #0F172A;
+    border: 2px solid #1E293B;
+    border-radius: 10px;
+    padding: 0 20px;
+    margin-bottom: 16px;
+}
+
+.isa101-machine-id {
+    font-family: 'Inter', sans-serif;
+    font-size: clamp(1.35rem, 2vw, 1.75rem);
+    font-weight: 900;
+    color: #F8FAFC;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.isa101-status-pill-normal {
+    background-color: #1E293B;
+    color: #94A3B8;
+    border: 2px solid #334155;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-size: clamp(1.05rem, 1.5vw, 1.35rem);
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
+.isa101-status-pill-hold {
+    background-color: #F59E0B;
+    color: #0F172A;
+    border: 2px solid #FBBF24;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-size: clamp(1.05rem, 1.5vw, 1.35rem);
+    font-weight: 900;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
+.isa101-status-pill-stop {
+    background-color: #EF4444;
+    color: #FFFFFF;
+    border: 2px solid #FCA5A5;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-size: clamp(1.05rem, 1.5vw, 1.35rem);
+    font-weight: 900;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
+.isa101-lang-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background-color: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #94A3B8;
+    white-space: nowrap;
+}
+.isa101-lang-active {
+    background-color: #334155;
+    color: #F8FAFC;
+    padding: 3px 9px;
+    border-radius: 5px;
+    font-weight: 900;
+}
+
+/* Block 2: Giant 48px Numbered Action Cards (#F8FAFC on #1E293B, #F59E0B 6px border) */
+.isa101-action-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.isa101-action-card {
+    background-color: #1E293B;
+    border: 1px solid #334155;
+    border-left: 6px solid #F59E0B;
+    border-radius: 10px;
+    padding: 22px 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 220px;
+}
+
+.isa101-step-header {
+    font-size: 0.92rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #F59E0B;
+}
+
+.isa101-giant-value {
+    font-family: 'JetBrains Mono', 'Inter', monospace;
+    font-size: 48px;
+    font-weight: 900;
+    color: #F8FAFC;
+    line-height: 1.08;
+    margin: 14px 0;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+}
+
+.isa101-sub-label {
+    font-size: 1.18rem;
+    font-weight: 700;
+    color: #F8FAFC;
+    line-height: 1.35;
+}
+
+.isa101-normal-calm-card {
+    background-color: #1E293B;
+    border: 1px solid #334155;
+    border-left: 6px solid #475569;
+    border-radius: 10px;
+    padding: 48px 28px;
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+/* Block 3: Fitts's Law 220px Palm-Button & Emerald Confirmation Card */
+.isa101-palm-scope div.stButton > button {
+    min-height: 220px !important;
+    width: 100% !important;
+    background-color: #EF4444 !important;
+    background-image: none !important;
+    color: #FFFFFF !important;
+    border: 4px solid #F59E0B !important;
+    border-radius: 14px !important;
+    padding: 18px 16px !important;
+    font-size: 1.55rem !important;
+    font-weight: 900 !important;
+    line-height: 1.35 !important;
+    white-space: pre-line !important;
+    box-shadow: none !important;
+    cursor: pointer !important;
+}
+.isa101-palm-scope div.stButton > button:hover {
+    background-color: #DC2626 !important;
+    border-color: #FEF3C7 !important;
+}
+.isa101-palm-scope div.stButton > button p {
+    font-size: 1.45rem !important;
+    font-weight: 900 !important;
+    color: #FFFFFF !important;
+    line-height: 1.4 !important;
+}
+
+.isa101-palm-zone {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.isa101-confirmed-card {
+    background-color: #10B981;
+    color: #0F172A;
+    border: 3px solid #A7F3D0;
+    border-radius: 12px;
+    min-height: 220px;
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+.isa101-confirmed-title {
+    font-size: clamp(1.35rem, 1.8vw, 1.7rem);
+    font-weight: 900;
+    color: #0F172A;
+    letter-spacing: 0.01em;
+    line-height: 1.25;
+}
+.isa101-confirmed-sub {
+    font-size: 1.12rem;
+    font-weight: 800;
+    color: #064E3B;
+    margin-top: 10px;
+}
+
+@keyframes isa101-pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.65; }
+    100% { opacity: 1; }
+}
+.isa101-listening-card {
+    background-color: #F59E0B;
+    color: #0F172A;
+    border: 3px solid #FEF3C7;
+    border-radius: 12px;
+    min-height: 220px;
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    animation: isa101-pulse 0.8s infinite ease-in-out;
+}
+
 /* Dual Cryptographic Certificate Card (Persona 3 QA) */
 .dual-cert-grid {
     display: grid;

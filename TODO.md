@@ -1,56 +1,57 @@
-# Vinyas — Pune City Buildathon Readiness & Hardware Integration Tracker (`TODO.md`)
+# OpsSense AI — Sequential Build & Verification Tracker (`TODO.md`)
 
-**Team Vinyas:** Nikhil Pande & Ravi Mule (Startup Buildathon India 2026)  
-**Architecture Baseline:** 4-Tier Edge-to-Cloud Architecture (`LIVE_HARDWARE` & `DEMO_SAFE_MODE`) — Stereo 48 kHz USB ADC, Primary Vibration + Coherence Booster DSP, Deterministic Physics Control-Plan Solver, ECDSA P-256 / Cloud KMS Signed Pillow Certificates, and Fragment-Isolated Streamlit UI.
-
----
-
-## Completed V2.1 Foundation (Phases 1–5)
-- [x] Initial 4-tier repository scaffold, Pydantic schemas, 14 reference JPEGs, synthetic 48 kHz WAV stems, Stage A/B edge modules, 4-agent pipeline, FastAPI server, and Streamlit `@st.fragment` UI.
+**Project:** OpsSense AI ("Autonomous Edge-to-Cloud Quality & Maintenance Twin for Discrete Manufacturing")  
+**Hackathon:** Startup Buildathon India (Pune City Buildathon)  
+**Workflow Rule:** Strict Gate-by-Gate execution.
 
 ---
 
-## Phase 6: Pune City Buildathon Upgrade & Live Hardware Integration
+## [x] Gate 0: Plan Gate (Workspace Discovery & Architecture Blueprint)
+- [x] Inspect workspace directory, existing files, and local CLI tools (`python3`, `node`, `npm`, `gcloud`, `docker`).
+- [x] Generate `implementation_plan.md` covering repository tree, `.agents/skills/` specification, AlloyDB Express (PostgreSQL 18) ScaNN + `AI.EXTRACT()`/`AI.IF()` schema, Google AI Model Routing, and REST/WebSocket API contracts.
+- [x] Generate `TODO.md` tracking all sequential gates.
+- [x] Provision GCP Billing (`016344-D7A282-081BCC`), Project (`vinyas-buildathon-6626`), APIs, and restricted `GEMINI_API_KEY` into `.env`.
 
-- [x] **Task 6.1: Configuration, Control Plan Limits, Drawing Spec Rubric & Upgraded Schemas**
-  - **Files:** `requirements.txt`, `.env.example`, `config/settings.py`, `config/control_plan_limits.json`, `config/drawing_spec_rubric.md`, `backend/models/schemas.py`, `data/fallback_cache/*.json`
-  - **Scope:**
-    - Add `HARDWARE_SOURCE`, `AUDIO_DEVICE_INDEX`, `CAMERA_DEVICE_INDEX`, `RELAY_SERIAL_PORT`, `VIBRATION_G_PER_FS`, and updated model IDs (`gemini-2.5-flash`, `gemma-3n-E4B-it` / `gemma-3-4b-it`, `gemini-3-pro-image-preview`).
-    - Create `config/control_plan_limits.json` (`[70, 110]` feedrate dial %, `[80, 115]` spindle speed dial %, `[0.65, 1.15]` relative chip-load ratio) and `config/drawing_spec_rubric.md` (14-Reference taxonomy `REF-01`..`REF-14`, >1,250 tokens).
-    - Add `InCycleTelemetrySummary` (with `cycle_id`), `DiagnosticEvidence`, `DeterministicControlSolution`, `RemediationPlan` (`served_from_fallback: bool = False`), and update `AOIInspectionResult` & `SanitizedVoiceIntent`.
-  - **Verification:** `pytest -v`
+---
 
-- [x] **Task 6.2: Tier 2 Edge Upgrade — Live USB Stereo ADC, Primary Vibration + Coherence Booster DSP (`resample_poly`) & Dual-Mode Serial Hardware Relay**
-  - **Files:** `edge/hilbert_envelope_dsp.py`, `edge/hardware_relay.py`, `edge/sensor_daemon.py`, `tests/test_hilbert_dsp_latency.py`
-  - **Scope:**
-    - Upgrade `edge/hilbert_envelope_dsp.py`: Ch 0 `2000–8000 Hz` band power ratio & spectral crest factor as primary chatter detector (protects light finishing cuts), Hilbert Envelope Coherence (`scipy.signal.coherence` after `250 Hz` LPF + `[::24]` decimation) as confidence booster, wrench-strike rejection for brief impulses with flat Ch 1 load, and `scipy.signal.resample_poly(stereo_chunk, up=1, down=3, axis=0)` for anti-aliased 16 kHz downsampling.
-    - Upgrade `edge/hardware_relay.py`: Implement `HardwareRelayController` with `pyserial` USB relay support + mock driver and switchable `DAY1_ANDON_ONLY` vs. `DAY30_EXT_FEED_HOLD_CUTOUT` modes.
-    - Upgrade `edge/sensor_daemon.py`: Real-time `(12000, 2)` 48 kHz capture via `sounddevice` (with `pyaudio` fallback) when `HARDWARE_SOURCE == "USB_STEREO_ADC"` and automatic fallback to WAV replay if unplugged.
-  - **Verification:** `pytest tests/test_hilbert_dsp_latency.py -v`
+## [x] Gate 1: Step 1 — Database, Agent Skills & Backend Core
+- [x] Create Authentic Google Agent Skills under `/.agents/skills/` (`agentskills.io` spec):
+  - [x] `/.agents/skills/ops-db-guardrails/SKILL.md`
+  - [x] `/.agents/skills/pcb-defect-triage/SKILL.md` + `references/ipc_solder_standards.md`
+  - [x] `/.agents/skills/bearing-acoustic-diagnostics/SKILL.md` + `references/vibration_thresholds.md`
+  - [x] `/.agents/skills/maintenance-work-order/SKILL.md` + `scripts/calc_downtime_cost.py`
+- [x] Create `backend/config.py` (Pydantic Settings reading `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `ALLOYDB_DSN`, `GCS_BUCKET`, `DEMO_FALLBACK_ENABLED` with zero hardcoded keys).
+- [x] Create `backend/schemas.py` (`InspectionRequest`, `Tier1TriageResult`, `Tier2DiagnosisResult`, `WorkOrderCreate`, `WorkOrderRecord`, `TelemetryMetrics`, `InspectionResponse`).
+- [x] Create `backend/db/init_alloydb.sql` (PostgreSQL 18 DDL with `vector`, `alloydb_scann`, `google_ml_integration`, `equipment_sops`, `inspection_incidents`, `work_orders`, ScaNN cosine index, and 6 Pune manufacturing SOP rows).
+- [x] Create `backend/db/alloydb_service.py` (Async PostgreSQL connector with ScaNN vector search, `AI.EXTRACT()` + `AI.IF()` in-SQL enrichment with Python fallback, and zero-crash local SQLite fallback `opssense_local.db`).
+- [x] Create `backend/services/skill_loader.py` (Progressive Disclosure loader: startup YAML metadata index + dynamic domain skill & reference loading + SQL guardrail validator).
+- [x] Create `backend/services/simulator_assets.py` (Serves 4 Pune discrete manufacturing scenarios with high-res inspection images + WAV audio telemetry for Line B).
+- [x] Create `backend/services/model_router.py` (Official `google-genai` SDK integration for Tier-1 `gemini-3.5-flash-lite`, Tier-2 `gemini-4-hydrogen` / `gemini-3.8-flash`, Tier-3 `gemini-nano-banana-2.1` + Pillow callout overlay fallback, Tier-4 `gemini-3.8-live` + flash streaming fallback, and deterministic cached JSON circuit breakers).
+- [x] Create `backend/main.py` (FastAPI app on port 8080 with `/health`, `/api/scenarios`, `/api/skills`, `/api/inspect`, `/api/work-orders`, `/api/copilot/chat`, WebSocket `/api/live-copilot`, and static mount for `/frontend/dist`).
+- [x] Create `edge_client/edge_gateway.py` (Standalone `gemma4:e4b` local Ollama multimodal pre-screener that escalates anomalies to `/api/inspect`).
+- [x] **Gate 1 Verification:** `pytest -v` passed (7/7 tests passing).
 
-- [x] **Task 6.3: Tier 3 Deterministic Physics Solver, Payback ROI Calculator, KMS Signed Pillow Certificates & Fallback-Aware Circuit Breaker**
-  - **Files:** `backend/skills/control_plan_solver.py`, `backend/skills/roi_calculator.py`, `backend/services/kms_certificate_service.py`, `backend/services/circuit_breaker.py`, `backend/services/nanobanana_aoi_service.py`, `backend/services/gemini_omni_service.py`, `backend/agents/planner_agent.py`, `backend/agents/validator_agent.py`, `backend/agents/orchestrator.py`, `backend/main.py`, `tests/test_ppap_sandbox.py`, `tests/test_circuit_breaker_types.py`
-  - **Scope:**
-    - Create `backend/skills/control_plan_solver.py` ("Physics Calculates, AI Diagnoses"): computes & clamps `operator_feedrate_dial_pct`, `spindle_speed_dial_pct`, and `relative_chip_load_ratio` within `[0.65, 1.15]` with `[PASS]` badges.
-    - Upgrade `backend/skills/roi_calculator.py` with validated `1.6-month (~48 days)` net hardware payback calculation.
-    - Create `backend/services/kms_certificate_service.py` rendering high-contrast Pillow QA / Foundry Chargeback Certificates binding `cycle_id` + raw frame SHA-256 and signing with Cloud KMS `EC_SIGN_P256_SHA256` (local `cryptography` ECDSA P-256 offline fallback).
-    - Upgrade `backend/services/circuit_breaker.py` to set `result.served_from_fallback = True` on fallback responses.
-    - Wire new services, `cycle_id` correlation, and relay mode toggle into `backend/main.py` and agents.
-  - **Verification:** `pytest tests/test_ppap_sandbox.py tests/test_circuit_breaker_types.py -v`
+---
 
-- [x] **Task 6.4: Tier 4 UI Upgrade — Honest Header Telemetry Badge, Fault Injection Studio & Signed Certificate Views**
-  - **Files:** `frontend/app.py`, `frontend/components/supervisor_cockpit.py`, `frontend/components/operator_ptt_view.py`, `frontend/components/qa_inspector_view.py`, `frontend/components/fault_injection_studio_view.py`
-  - **Scope:**
-    - Update header badge to `[Alert Latency: <300ms | Source: LIVE_USB / SIMULATED | Fallback: FALSE/TRUE]` and add relay mode toggle (`DAY1_ANDON_ONLY` / `DAY30_EXT_FEED_HOLD_CUTOUT`).
-    - Create `frontend/components/fault_injection_studio_view.py` (stereo fault injection + Nano Banana Pro Day-0 synthetic defect preview).
-    - Surface deterministic physics solver outputs, `1.6-month (~48 days)` payback metric, `cycle_id` correlation, and downloadable ECDSA-signed Pillow QA Certificate PNG in the cockpit and QA inspector views.
-  - **Verification:** `python3 -c "import frontend.app, frontend.components.fault_injection_studio_view, frontend.components.supervisor_cockpit, frontend.components.qa_inspector_view, frontend.components.operator_ptt_view; print('Task 6.4 OK')"`
+## [x] Gate 2: Step 2 — Frontend Control Room & Virtual Factory Simulator
+- [x] Initialize `/frontend` with React 18, Vite, Tailwind CSS, and `lucide-react`.
+- [x] Build **Top Telemetry Bar** (`OpsSense AI // Autonomous Edge-to-Cloud Quality Twin`, live `/health` status pills for Cloud Run, AlloyDB Express + ScaNN, Inference Mode, and **"AI Stack & Architecture"** modal button).
+- [x] Build **"AI Stack & Architecture" Modal** showing Model-to-Role table, `.agents/skills/` Progressive Disclosure status, and stage latency metrics (`tier1_ms`, `scann_rag_ms`, `tier2_ms`, `tier3_ms`).
+- [x] Build **Left Column — Virtual Factory Line Simulator** (4 clickable scenarios, image preview, sensor cards, playable audio clip for Line B, Webcam/Upload override toggle, and **"Run Edge-to-Cloud Inspection"** CTA).
+- [x] Build **Center Column — Agentic Pipeline, ScaNN Grounding & Visual SOP** (5-stage stepper, Diagnosis Summary Card, Side-by-side Raw vs. Nano Banana 2.1 Visual Repair Overlay, and **"Approve & Log Work Order to AlloyDB"** button).
+- [x] Build **Right Column — Gemini Live Co-Pilot & Persisted AlloyDB Incident Log** (Voice PTT mic + quick prompt chips + streaming response, and Persisted Work Orders ledger displaying `AI.EXTRACT()` tags and `AI.IF()` SLA flags).
+- [x] **Gate 2 Verification:** `npm run build` compiled `/frontend/dist` cleanly with zero errors.
 
-- [x] **Task 6.5: Live Hardware Calibration & Diagnostics CLI (`scripts/verify_hardware_rig.py`) & Full E2E Verification**
-  - **Files:** `scripts/verify_hardware_rig.py`, `tests/test_stage_rehearsal_e2e.py`
-  - **Scope:**
-    - Check 1: Stereo 48 kHz Audio Interface Discovery (`sounddevice`), 3-second RMS & peak frequency calibration on Ch 0 & Ch 1 for `VIBRATION_G_PER_FS` and `CT_AMPS_PER_FS`.
-    - Check 2: Live Wrench-Strike vs. Chatter Loopback Test executing `stage_a_deterministic_fast_path()`, printing CPU time (`<2.0 ms`), vibration crest factor, envelope coherence, and state.
-    - Check 3: USB Camera & V-Block Capture Test (`CAMERA_DEVICE_INDEX`), crops/resizes to `512x512` JPEG (`<60 KB`), computes SHA-256 digest, and generates signed Pillow QA Certificate at `data/test_certificate.png`.
-    - Check 4: USB Relay / Andon Toggle Test cycling `GREEN_NOMINAL` -> `YELLOW_M01_HOLD` -> `RED_PREEMPT` and verifying `DAY30_EXT_FEED_HOLD_CUTOUT`.
-  - **Verification:** `python3 scripts/verify_hardware_rig.py --simulate` and `pytest -v`
+---
+
+## [x] Gate 3: Step 3 — Single-Container Docker & Cloud Run Deployment
+- [x] Create multi-stage `Dockerfile` (Stage 1: Node 20 builds `/frontend/dist`; Stage 2: Python 3.11-slim serves FastAPI + `/frontend/dist` via Uvicorn on port `8080`).
+- [x] Update `.dockerignore`, `requirements.txt`, and `scripts/deploy_cloud_run.sh`.
+- [x] Deploy single container live to Google Cloud Run (`--allow-unauthenticated`, port `8080`, region `asia-south1`).
+
+---
+
+## [x] Gate 4: Step 4 — Hardening, Security & AI-Evaluation Docs
+- [x] Verify circuit-breaker fallbacks across Tier-1, Tier-2, Tier-3, Tier-4, and Tier-5 (`AI.EXTRACT()` / `AI.IF()`).
+- [x] Verify `.gitignore` and `.dockerignore` block `.env`, `secrets/`, `*.json` keys, `__pycache__/`, `node_modules/`, and `*.db`.
+- [x] Write AI-Evaluation-ready `README.md` with quantified problem statement, Mermaid architecture diagram, Model Justification Matrix, Virtual Simulator vs. Edge Client guide, and `gcloud run deploy` commands.

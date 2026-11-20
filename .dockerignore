@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+secrets/
+*sa-key*.json
+*credentials*.json
+__pycache__/
+*.pyc
+.pytest_cache/
+frontend/node_modules/
+*.db
+.DS_Store

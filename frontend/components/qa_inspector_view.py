@@ -13,9 +13,11 @@ Isolated via @st.fragment.
     * Clean Dual Cryptographic Certificate Card displaying both the truncated `Cloud KMS / HMAC-SHA256`
       raw frame digest and the `Nano Banana Pro + SynthID` watermarked QA stamp side-by-side.
 """
+import base64
 import json
 from pathlib import Path
 from typing import Any
+import httpx
 from PIL import Image, ImageDraw
 import streamlit as st
 from config.settings import settings
@@ -33,11 +35,14 @@ def _load_14_references() -> list[dict[str, Any]]:
     return []
 
 
-def _get_sample_bundle(sample_choice: str) -> tuple[Path, InCycleTelemetrySummary, AOIInspectionResult]:
+def _get_sample_bundle(
+    sample_choice: str,
+    backend_url: str = "http://localhost:8000",
+) -> tuple[Path, InCycleTelemetrySummary, AOIInspectionResult]:
     if "REF-10" in sample_choice:
         img_path = Path("data/golden_references/REF-10.jpg")
         in_cycle = InCycleTelemetrySummary(
-            cycle_id="CYC_CHAKAN_04_99281",
+            cycle_id="CYC_CHAKAN_04_99280",
             stage_a_state="GREEN_NOMINAL",
             peak_vibration_rms_g=1.12,
             band_power_ratio_2k_8k=0.14,
@@ -46,7 +51,7 @@ def _get_sample_bundle(sample_choice: str) -> tuple[Path, InCycleTelemetrySummar
             ct_ripple_std_amps=0.26,
             chatter_detected=False,
         )
-        aoi = AOIInspectionResult.model_validate_json(
+        local_aoi = AOIInspectionResult.model_validate_json(
             Path("data/fallback_cache/aoi_foundry_porosity_ref10.json").read_text(encoding="utf-8")
         )
     elif "REF-04" in sample_choice:
@@ -61,7 +66,7 @@ def _get_sample_bundle(sample_choice: str) -> tuple[Path, InCycleTelemetrySummar
             ct_ripple_std_amps=0.46,
             chatter_detected=True,
         )
-        aoi = AOIInspectionResult.model_validate_json(
+        local_aoi = AOIInspectionResult.model_validate_json(
             Path("data/fallback_cache/aoi_chatter_reject_ref04.json").read_text(encoding="utf-8")
         )
     elif "REF-12" in sample_choice:
@@ -76,7 +81,7 @@ def _get_sample_bundle(sample_choice: str) -> tuple[Path, InCycleTelemetrySummar
             ct_ripple_std_amps=0.22,
             chatter_detected=False,
         )
-        aoi = AOIInspectionResult(
+        local_aoi = AOIInspectionResult(
             cycle_id="CYC_CHAKAN_04_99283",
             passed_iatf_16949=True,
             matched_reference_token_id="REF-12",
@@ -102,14 +107,39 @@ def _get_sample_bundle(sample_choice: str) -> tuple[Path, InCycleTelemetrySummar
             ct_ripple_std_amps=0.24,
             chatter_detected=False,
         )
-        aoi = AOIInspectionResult.model_validate_json(
+        local_aoi = AOIInspectionResult.model_validate_json(
             Path("data/fallback_cache/aoi_pass_synthid.json").read_text(encoding="utf-8")
         )
 
-    aoi.cycle_id = in_cycle.cycle_id
-    aoi.in_cycle_summary = in_cycle
-    aoi.served_from_fallback = settings.DEMO_SAFE_MODE
-    return img_path, in_cycle, aoi
+    # Attempt live/backend FastAPI `/api/v1/aoi/inspect` endpoint first (with automatic local failover)
+    candidates = [backend_url.rstrip("/")]
+    if settings.BACKEND_API_URL.rstrip("/") not in candidates:
+        candidates.append(settings.BACKEND_API_URL.rstrip("/"))
+    raw_b64 = base64.b64encode(img_path.read_bytes()).decode("ascii")
+    for target_url in candidates:
+        try:
+            with httpx.Client(timeout=2.5) as client:
+                resp = client.post(
+                    f"{target_url}/api/v1/aoi/inspect",
+                    json={
+                        "part_id": "DIFF_HOUSING_SN_8892",
+                        "work_order_id": "WO_ALSI9CU3_DIFF_882",
+                        "cycle_id": in_cycle.cycle_id,
+                        "acoustic_rms": in_cycle.peak_vibration_rms_g,
+                        "image_b64": raw_b64,
+                    },
+                )
+                if resp.status_code == 200:
+                    live_aoi = AOIInspectionResult.model_validate(resp.json())
+                    live_aoi.in_cycle_summary = live_aoi.in_cycle_summary or in_cycle
+                    return img_path, in_cycle, live_aoi
+        except Exception:
+            continue
+
+    local_aoi.cycle_id = in_cycle.cycle_id
+    local_aoi.in_cycle_summary = in_cycle
+    local_aoi.served_from_fallback = True
+    return img_path, in_cycle, local_aoi
 
 
 def _render_inspection_overlay_image(img_path: Path, token_id: str, zoom_roi: bool) -> Image.Image:
@@ -182,7 +212,7 @@ def render_qa_inspector_view(backend_url: str = "http://localhost:8000"):
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-            img_path, in_cycle, aoi = _get_sample_bundle(sample_choice)
+            img_path, in_cycle, aoi = _get_sample_bundle(sample_choice, backend_url=backend_url)
             raw_bytes = img_path.read_bytes()
 
             if show_overlay or zoom_roi:
@@ -254,12 +284,14 @@ def render_qa_inspector_view(backend_url: str = "http://localhost:8000"):
 
             raw_sha_trunc = f"{cert_bundle['raw_frame_sha256'][:18]}...{cert_bundle['raw_frame_sha256'][-10:]}"
             ecdsa_sig_trunc = f"{cert_bundle['kms_signature_b64'][:28]}...{cert_bundle['kms_signature_b64'][-12:]}"
+            active_ref04_style = "border: 1px solid #EF4444; background: rgba(239, 68, 68, 0.14);" if aoi.matched_reference_token_id == "REF-04" else "border: 1px solid #1E293B; background: #0B1120;"
+            active_ref10_style = "border: 1px solid #F59E0B; background: rgba(245, 158, 11, 0.14);" if aoi.matched_reference_token_id == "REF-10" else "border: 1px solid #1E293B; background: #0B1120;"
 
             st.markdown(
                 f"""
                 <div class="hmi-panel">
                     <div class="hmi-section-header">
-                        <span class="hmi-section-title">2. Cycle-Correlated Adjudication &amp; Dual Provenance</span>
+                        <span class="hmi-section-title">2. Cycle-Correlated Adjudication &amp; Cloud KMS Provenance</span>
                         <span class="hmi-pill-tag emerald">&lt; 1.1s Cached Grading</span>
                     </div>
 
@@ -279,16 +311,35 @@ def render_qa_inspector_view(backend_url: str = "http://localhost:8000"):
                         <span style="color:#94A3B8;">Vib RMS: {in_cycle.peak_vibration_rms_g:.2f}G</span>
                     </div>
 
-                    <!-- Dual Cryptographic Certificate Card (Side-by-Side) -->
+                    <!-- Unified cycle_id Attribution Matrix (REF-04 CNC Chatter vs REF-10 Foundry Porosity) -->
+                    <div style="background: #0F172A; border: 1px solid #1E293B; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px;">
+                        <div style="font-size: 0.71rem; font-weight: 800; text-transform: uppercase; color: #94A3B8; letter-spacing: 0.04em; margin-bottom: 6px;">
+                            Unified <code style="color:#38BDF8;">cycle_id</code> Fault Attribution Matrix (In-Cycle Vibration &times; Post-Cycle Optical AOI)
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.74rem; font-family: 'JetBrains Mono', monospace;">
+                            <div style="{active_ref04_style} border-radius: 5px; padding: 6px 8px;">
+                                <div style="color: #F87171; font-weight: 800;">CNC Chatter (REF-04)</div>
+                                <div style="color: #CBD5E1; margin-top: 2px;">In-Cycle Coh &ge; 0.72 + 4.21 kHz Marks</div>
+                                <div style="color: #94A3B8; font-size: 0.7rem;">Liability: Internal Machining Scrap</div>
+                            </div>
+                            <div style="{active_ref10_style} border-radius: 5px; padding: 6px 8px;">
+                                <div style="color: #FBBF24; font-weight: 800;">Foundry Porosity (REF-10)</div>
+                                <div style="color: #CBD5E1; margin-top: 2px;">In-Cycle Coh &lt; 0.20 (Clean Cut) + Gas Pits</div>
+                                <div style="color: #34D399; font-size: 0.7rem;">Liability: Supplier Chargeback (+INR 14k)</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Deterministic Pillow & Google Cloud KMS Cryptographic Certificate Card -->
                     <div class="dual-cert-grid">
                         <div class="cert-layer-card" style="border-top: 3px solid #38BDF8;">
-                            <div class="cert-layer-title">Layer 1 • Cloud KMS / HMAC-SHA256</div>
+                            <div class="cert-layer-title">Layer 1 • Google Cloud KMS (EC_SIGN_P256_SHA256)</div>
                             <div style="font-size: 0.73rem; color: #94A3B8; margin-bottom: 6px;">
-                                Raw Optical Frame + Cycle Telemetry Digest
+                                Raw Optical Frame SHA-256 + <code style="color:#38BDF8;">{in_cycle.cycle_id}</code> Digest
                             </div>
                             <div class="cert-hash-mono">
                                 SHA256: {raw_sha_trunc}<br/>
-                                P-256 : {ecdsa_sig_trunc}
+                                KMS   : {ecdsa_sig_trunc}
                             </div>
                             <div style="margin-top: 6px; font-size: 0.72rem; color: #10B981; font-weight: 700;">
                                 ✅ ECDSA P-256 Verified ({cert_bundle['signing_backend']})
@@ -296,16 +347,16 @@ def render_qa_inspector_view(backend_url: str = "http://localhost:8000"):
                         </div>
 
                         <div class="cert-layer-card" style="border-top: 3px solid #F59E0B;">
-                            <div class="cert-layer-title" style="color: #F59E0B;">Layer 2 • Nano Banana Pro + SynthID</div>
+                            <div class="cert-layer-title" style="color: #F59E0B;">Layer 2 • Deterministic Pillow QA Certificate</div>
                             <div style="font-size: 0.73rem; color: #94A3B8; margin-bottom: 6px;">
-                                Tamper-Evident Visual QA Stamp &amp; Watermark
+                                Non-Generative Tamper-Evident Audit PNG (Day-0 Synth: Nano Banana Pro)
                             </div>
                             <div class="cert-hash-mono">
-                                Model : {settings.GEMINI_IMAGE_MODEL_ID}<br/>
+                                Engine: Pillow (PIL) Deterministic Renderer<br/>
                                 Token : {aoi.matched_reference_token_id} (Ra {aoi.surface_ra_estimate_um:.2f} µm)
                             </div>
                             <div style="margin-top: 6px; font-size: 0.72rem; color: #F59E0B; font-weight: 700;">
-                                🛡️ SynthID Provenance Bound to Debit Note
+                                🛡️ Cryptographically Bound to Supplier Debit Note
                             </div>
                         </div>
                     </div>

@@ -1,24 +1,76 @@
 """
 frontend/components/operator_ptt_view.py
-Vinyas Operator Voice Pod View (Persona 2: Shop-Floor Machine Operator):
-Isolated via @st.fragment to prevent interrupting the Gemini Live WebSocket loop.
-Designed for Pune-Chakan / Chennai / Coimbatore operators wearing oil-coated gloves in 90 dB ambient noise:
-- Fixes v1 contrast bug: enforces WCAG AAA contrast (#0F172A dark slate ink on #FEF3C7 warm amber fill,
-  plus #F8FAFC crisp white text on #1E293B dark slate card with #F59E0B 6px left accent border)
-- Left 60% — Glanceable 3-Step High-Contrast Vernacular Action Card:
-  Large 22px-26px bold Marathi + Hinglish instruction text broken into 3 numbered visual step tiles
-- Right 40% — Ergonomic 40mm Palm-Button PTT Simulator (min-height: 88px), active audio waveform indicator,
-  quick-select vernacular voice presets, and SanitizedVoiceIntent confirmation pill
+ISA-101 High-Performance HMI Operator Screen for Vinyas:
+- Distraction-free, 3-second-glanceable CNC Shop-Floor Operator Screen
+- Zero model names, zero hardware bindings, zero latency/coherence metrics, zero ROI counters
+- Flat neutral dark slate (#0F172A) base; semantic color appears ONLY when human action is required
+- 3-Block Layout (Zero scrolling on 1080p):
+  * Block 1: Top Machine Status Banner (Full Width, 72px height: VMC-04 • TOOL T03 | Status Pill | Language Pill)
+  * Block 2: "What To Do Now" Action Grid (Left 65%: 3 giant 48px bold numbered action cards in M01 HOLD,
+    or a single calm grey card in RUNNING state)
+  * Block 3: Oversized Fitts's Law Palm-Button Confirmation Zone (Right 35%: min-height 220px tactile
+    PRESS & SPEAK button -> instant LISTENING... pulse -> solid Emerald Green ✓ CONFIRMED — PRESS CYCLE START card)
+- Preserves @st.fragment isolation and Pydantic bindings (Day1NonInvasiveAction, SanitizedVoiceIntent) under the hood.
 """
+import time
 from typing import Any
 import httpx
 import streamlit as st
-from config.settings import settings
+from backend.models.schemas import Day1NonInvasiveAction, SanitizedVoiceIntent
+
+# Clean vernacular localization table (Zero technical jargon, zero PPAP range clutter)
+_LANG_STRINGS: dict[str, dict[str, str]] = {
+    "मराठी": {
+        "step1_sub": "Feed Knob 85% वर करा",
+        "step2_sub": "Speed Knob 90% वर करा",
+        "step3_sub": "T03 Insert Corner #2 बदला",
+        "palm_sub": 'बटण दाबा आणि बोला: "T03 बदलला"',
+        "normal_msg": "Machine Normal — Continue Production.",
+        "normal_sub": "मशीन सुरळीत चालू आहे — उत्पादन सुरू ठेवा.",
+        "confirmed_sub": "पुढील सायकल सुरू करण्यासाठी हिरवे CYCLE START बटण दाबा",
+        "default_utterance": "T03 corner 2 badalala, resume kara",
+    },
+    "हिंदी": {
+        "step1_sub": "Feed Knob 85% पर करें",
+        "step2_sub": "Speed Knob 90% पर करें",
+        "step3_sub": "T03 Insert Corner #2 बदलें",
+        "palm_sub": 'बटन दबाएं और बोलें: "T03 बदला"',
+        "normal_msg": "Machine Normal — Continue Production.",
+        "normal_sub": "मशीन सामान्य है — उत्पादन जारी रखें।",
+        "confirmed_sub": "अगली साइकिल शुरू करने के लिए हरा CYCLE START बटन दबाएं",
+        "default_utterance": "T03 corner 2 badal diya, resume karo",
+    },
+    "EN": {
+        "step1_sub": "Set Feed Knob to 85%",
+        "step2_sub": "Set Speed Knob to 90%",
+        "step3_sub": "Index T03 Insert to Corner #2",
+        "palm_sub": 'Press button & say: "T03 swapped"',
+        "normal_msg": "Machine Normal — Continue Production.",
+        "normal_sub": "All cutting parameters nominal — no operator action required.",
+        "confirmed_sub": "Action logged. Press physical green CYCLE START on controller.",
+        "default_utterance": "T03 insert corner 2 swapped, resume cycle",
+    },
+}
 
 
-def _send_voice_utterance(backend_url: str, utterance: str) -> dict[str, Any]:
+def _build_bound_day1_action(lang: str) -> Day1NonInvasiveAction:
+    """Maintains strict Pydantic Day1NonInvasiveAction contract under the hood."""
+    strings = _LANG_STRINGS.get(lang, _LANG_STRINGS["मराठी"])
+    return Day1NonInvasiveAction(
+        operator_feedrate_dial_pct=85,
+        spindle_speed_dial_pct=90,
+        m01_manual_wear_offset_z_microns=12.0,
+        require_insert_indexing=True,
+        operator_card_marathi=(
+            f"1: {strings['step1_sub']} | 2: {strings['step2_sub']} | 3: {strings['step3_sub']}"
+        ),
+    )
+
+
+def _send_voice_utterance(backend_url: str, utterance: str) -> SanitizedVoiceIntent:
+    """Calls backend voice gate and returns a validated SanitizedVoiceIntent Pydantic model."""
     try:
-        with httpx.Client(timeout=3.0) as client:
+        with httpx.Client(timeout=2.5) as client:
             resp = client.post(
                 f"{backend_url}/api/v1/voice/interact",
                 json={
@@ -34,197 +86,251 @@ def _send_voice_utterance(backend_url: str, utterance: str) -> dict[str, Any]:
                 },
             )
             if resp.status_code == 200:
-                return resp.json()
+                return SanitizedVoiceIntent.model_validate(resp.json())
     except Exception:
         pass
 
     lower = utterance.lower()
     if "supervisor" in lower or "bolva" in lower:
-        return {
-            "intent": "REQUEST_SUPERVISOR",
-            "spoken_response_marathi": "Supervisor la alert pathavla aahe. Krupaya M01 Hold var machine thambvun theva.",
-        }
+        return SanitizedVoiceIntent(
+            intent="REQUEST_SUPERVISOR",
+            spoken_response_marathi="Supervisor la alert pathavla aahe.",
+            served_from_fallback=True,
+        )
     if "ka thambla" in lower or "explain" in lower:
-        return {
-            "intent": "EXPLAIN_HOLD",
-            "spoken_response_marathi": "Tool T03 finishing cut madhye 4,210 Hz chatter detect jhala aahe. Feed 85% kara ani Corner 2 insert firva.",
-        }
+        return SanitizedVoiceIntent(
+            intent="EXPLAIN_HOLD",
+            spoken_response_marathi="Feed 85% kara ani T03 Corner 2 insert firva.",
+            served_from_fallback=True,
+        )
     if "hammer" in lower or "normal" in lower:
-        return {
-            "intent": "IGNORE_NOISE",
-            "spoken_response_marathi": "Bahercha aawaj (floor shock) ignore kela aahe. Cutting load normal aahe.",
-        }
-    return {
-        "intent": "CONFIRM_INSERT_SWAP",
-        "spoken_response_marathi": "धन्यवाद! Tool T03 Corner #2 insert swap आणि 85% Feedrate Override confirm झाले आहे. Machine cycle सुरू करण्यासाठी सुरक्षित आहे. (+INR 16,200 वाचवले)",
-    }
+        return SanitizedVoiceIntent(
+            intent="IGNORE_NOISE",
+            spoken_response_marathi="Cut normal aahe.",
+            served_from_fallback=True,
+        )
+    return SanitizedVoiceIntent(
+        intent="CONFIRM_INSERT_SWAP",
+        spoken_response_marathi="धन्यवाद! T03 Corner #2 आणि 85% Feed confirm झाले आहे.",
+        served_from_fallback=True,
+    )
+
+
+def _render_language_pill_html(active_lang: str) -> str:
+    parts = []
+    for lang in ("मराठी", "हिंदी", "EN"):
+        if lang == active_lang:
+            parts.append(f'<span class="isa101-lang-active">{lang}</span>')
+        else:
+            parts.append(f"<span>{lang}</span>")
+    joined = ' <span style="color:#475569;">|</span> '.join(parts)
+    return f'<div class="isa101-lang-pill">{joined}</div>'
 
 
 @st.fragment
 def render_operator_ptt_view(backend_url: str = "http://localhost:8000"):
-    """Renders the Glanceable 3-Step Vernacular Operator HMI & 40mm Palm-Button PTT Simulator."""
-    col_card, col_ptt = st.columns([1.5, 1.0], gap="large")
+    """Renders the ISA-101 High-Performance HMI 3-Block CNC Operator Screen."""
+    # Collapse sidebar and enforce flat #0F172A ISA-101 slate background on Operator View
+    st.markdown(
+        """
+        <style>
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+            background-color: #0F172A !important;
+        }
+        [data-testid="stSidebar"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "op_lang" not in st.session_state:
+        st.session_state["op_lang"] = "मराठी"
+    if "op_machine_state" not in st.session_state:
+        st.session_state["op_machine_state"] = "M01_HOLD"
+    if "op_ptt_confirmed" not in st.session_state:
+        st.session_state["op_ptt_confirmed"] = False
+
+    active_lang: str = st.session_state["op_lang"]
+    machine_state: str = st.session_state["op_machine_state"]
+    ptt_confirmed: bool = st.session_state["op_ptt_confirmed"]
+
+    # Bind Pydantic contract under the hood
+    day1_action = _build_bound_day1_action(active_lang)
+    strings = _LANG_STRINGS[active_lang]
+
+    # Discrete Switch Role button in top-left corner (sidebar is hidden by default on Operator View)
+    top_nav_col, _spacer = st.columns([0.16, 0.84])
+    with top_nav_col:
+        if st.button("← Switch Role", key="op_top_left_switch_role_btn"):
+            st.session_state["active_station_nav"] = "1. Supervisor Cockpit"
+            st.rerun()
 
     # =========================================================================
-    # LEFT 60%: High-Contrast Vernacular Action Card (WCAG AAA Compliant)
+    # BLOCK 1: Top Machine Status Banner (Full Width, 72px height)
     # =========================================================================
-    with col_card:
-        st.markdown(
-            """
-            <div class="operator-vernacular-card">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <span style="background: #F59E0B; color: #0F172A; font-weight: 900; font-size: 0.78rem; padding: 4px 10px; border-radius: 6px; letter-spacing: 0.04em;">
-                            ⚠️ M01 HOLD • TOOL T03
-                        </span>
-                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #F8FAFC; font-weight: 700;">
-                            FANUC_0iTF_CHAKAN_04
-                        </span>
+    if machine_state == "RUNNING":
+        status_pill_html = '<div class="isa101-status-pill-normal">RUNNING — NO ACTION NEEDED</div>'
+    elif machine_state == "EMERGENCY_STOP":
+        status_pill_html = '<div class="isa101-status-pill-stop">🛑 EMERGENCY STOP</div>'
+    else:
+        status_pill_html = '<div class="isa101-status-pill-hold">⚠ M01 HOLD — ACTION REQUIRED</div>'
+
+    lang_pill_html = _render_language_pill_html(active_lang)
+
+    st.markdown(
+        f"""
+        <div class="isa101-top-banner">
+            <div class="isa101-machine-id">VMC-04 &bull; TOOL T03</div>
+            <div>{status_pill_html}</div>
+            <div>{lang_pill_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # =========================================================================
+    # BLOCK 2 (Left 65%) & BLOCK 3 (Right 35%): Zero-Scroll Main Canvas
+    # =========================================================================
+    col_actions, col_palm = st.columns([1.85, 1.0], gap="large")
+
+    with col_actions:
+        if machine_state == "RUNNING":
+            st.markdown(
+                f"""
+                <div class="isa101-normal-calm-card">
+                    <div style="font-size: 2.1rem; font-weight: 800; color: #94A3B8; letter-spacing: -0.01em;">
+                        {strings['normal_msg']}
                     </div>
-                    <span style="background: #EF4444; color: #F8FAFC; padding: 4px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; font-weight: 800;">
-                        ANDON: AMBER HOLD
-                    </span>
+                    <div style="font-size: 1.25rem; font-weight: 600; color: #64748B; margin-top: 10px;">
+                        {strings['normal_sub']}
+                    </div>
                 </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"""
+                <div class="isa101-action-grid">
+                    <!-- STEP 1: DIAL FEED -->
+                    <div class="isa101-action-card">
+                        <div class="isa101-step-header">1. STEP 1 — DIAL FEED</div>
+                        <div class="isa101-giant-value">{day1_action.operator_feedrate_dial_pct}%</div>
+                        <div class="isa101-sub-label">{strings['step1_sub']}</div>
+                    </div>
 
-                <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #94A3B8; margin-bottom: 4px;">
-                    मराठी कृती सूचना • Vernacular Shop-Floor Action (Gemma 3 4B)
+                    <!-- STEP 2: DIAL SPEED -->
+                    <div class="isa101-action-card">
+                        <div class="isa101-step-header">2. STEP 2 — DIAL SPEED</div>
+                        <div class="isa101-giant-value">{day1_action.spindle_speed_dial_pct}%</div>
+                        <div class="isa101-sub-label">{strings['step2_sub']}</div>
+                    </div>
+
+                    <!-- STEP 3: TOOL T03 -->
+                    <div class="isa101-action-card">
+                        <div class="isa101-step-header">3. STEP 3 — TOOL T03</div>
+                        <div class="isa101-giant-value">CORNER #2</div>
+                        <div class="isa101-sub-label">{strings['step3_sub']}</div>
+                    </div>
                 </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                <!-- High-Contrast Warm Amber Callout (#0F172A Ink on #FEF3C7 Fill -> WCAG AAA 17.4:1 Contrast) -->
-                <div class="operator-amber-callout">
-                    "Tool T03 Finishing Pass मध्ये chatter आला आहे. M01 Hold वर Feedrate Override knob 85% वर करा आणि Insert Corner #2 बदला."
-                </div>
+    with col_palm:
+        feedback_slot = st.empty()
 
-                <!-- 3 Numbered Visual Step Tiles with Large Icons -->
-                <div class="step-tile-grid">
-                    <div class="step-tile">
-                        <div class="step-tile-num">STEP 1 • DIAL</div>
-                        <div class="step-tile-title">🎛️ 1. Dial Feed → 85%</div>
-                        <div class="step-tile-desc">
-                            Physical Feedrate knob <strong>85%</strong> व Spindle Speed <strong>90%</strong> वर सेट करा (PPAP 70–110%).
+        if not ptt_confirmed:
+            with feedback_slot.container():
+                st.markdown('<div class="isa101-palm-scope">', unsafe_allow_html=True)
+                palm_pressed = st.button(
+                    f"🎙️🤚 PRESS & SPEAK\n{strings['palm_sub']}",
+                    key="isa101_palm_ptt_btn",
+                    type="primary",
+                    use_container_width=True,
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            if palm_pressed:
+                # 1. Instant pulsing LISTENING... state for input certainty
+                feedback_slot.markdown(
+                    """
+                    <div class="isa101-listening-card">
+                        <div style="font-size: 2.4rem; margin-bottom: 6px;">🎙️</div>
+                        <div style="font-size: 1.75rem; font-weight: 900; color: #0F172A; letter-spacing: 0.04em;">
+                            LISTENING...
                         </div>
                     </div>
-                    <div class="step-tile">
-                        <div class="step-tile-num">STEP 2 • TOOL</div>
-                        <div class="step-tile-title">🔄 2. Index T03 → Corner #2</div>
-                        <div class="step-tile-desc">
-                            M01 थांब्यावर <strong>Tool T03 Carbide Insert</strong> फिरवून नवीन <strong>Corner #2</strong> लॉक करा.
-                        </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                utterance = st.session_state.get("demo_custom_utterance", strings["default_utterance"])
+                validated_intent = _send_voice_utterance(backend_url, utterance)
+                st.session_state["last_sanitized_voice_intent"] = validated_intent.model_dump()
+                time.sleep(0.35)
+                st.session_state["op_ptt_confirmed"] = True
+                # 2. Immediately flip to solid Emerald Green confirmation card
+                feedback_slot.markdown(
+                    f"""
+                    <div class="isa101-confirmed-card">
+                        <div class="isa101-confirmed-title">✓ CONFIRMED — PRESS CYCLE START</div>
+                        <div class="isa101-confirmed-sub">{strings['confirmed_sub']}</div>
                     </div>
-                    <div class="step-tile">
-                        <div class="step-tile-num">STEP 3 • VOICE</div>
-                        <div class="step-tile-title">🎙️ 3. Press Palm-Button to Confirm</div>
-                        <div class="step-tile-desc">
-                            40mm Palm-Button दाबा आणि सांगा: <em>"T03 corner 2 badalala"</em>.
-                        </div>
-                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            # 2. Solid Emerald Green confirmation card
+            feedback_slot.markdown(
+                f"""
+                <div class="isa101-confirmed-card">
+                    <div class="isa101-confirmed-title">✓ CONFIRMED — PRESS CYCLE START</div>
+                    <div class="isa101-confirmed-sub">{strings['confirmed_sub']}</div>
                 </div>
-
-                <div style="margin-top: 14px; padding: 10px 12px; background: #0F172A; border: 1px solid #334155; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem; color: #CBD5E1;">
-                    <span>🔒 <strong>Zero G-Code Edit Policy:</strong> Controller program locked under IATF 16949.</span>
-                    <span class="hmi-pill-tag emerald">+INR 16,200 Casting Protected</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
     # =========================================================================
-    # RIGHT 40%: Ergonomic 40mm Palm-Button PTT Simulator
+    # DISCRETE DEMO CONTROLS EXPANDER (Collapsed at Very Bottom of Page)
     # =========================================================================
-    with col_ptt:
-        st.markdown(
-            """
-            <div class="hmi-panel" style="margin-bottom: 10px;">
-                <div class="hmi-section-header">
-                    <span class="hmi-section-title">IP67 40mm Palm-Button Voice Pod</span>
-                    <span class="hmi-pill-tag amber">90 dB Noise Gate</span>
-                </div>
-                <div style="display: flex; align-items: center; justify-content: space-between; background: #0B1120; border: 1px solid #1E293B; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="telemetry-dot"></span>
-                        <span style="font-size: 0.76rem; font-weight: 700; color: #F8FAFC;">Gemini Live 2.0 Audio Link</span>
-                    </div>
-                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; color: #10B981;">
-                        ▁ ▃ ▆ █  ▂ ▄ ▇ ▃ ▁ READY
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+    with st.expander("Demo Controls", expanded=False):
+        d_col1, d_col2, d_col3, d_col4 = st.columns([1.0, 1.0, 1.6, 0.8])
 
-        preset = st.selectbox(
-            "Quick-Select Vernacular Voice Preset (Marathi / Hinglish):",
-            [
-                "T03 insert corner 2 badalala, resume kara (CONFIRM_INSERT_SWAP)",
-                "Machine ka thambla? Tool badlaycha ka? (EXPLAIN_HOLD)",
-                "Supervisor la bolva, bore size check karaycha aahe (REQUEST_SUPERVISOR)",
-                "Floor var hammer padla, cut normal aahe (IGNORE_NOISE)",
-            ],
-            index=0,
-        )
+        with d_col1:
+            st.radio(
+                "Operator Language",
+                ["मराठी", "हिंदी", "EN"],
+                key="op_lang",
+                horizontal=True,
+            )
 
-        custom_text = st.text_input(
-            "Or type custom operator speech:",
-            value="",
-            placeholder="e.g., T03 corner 2 badalala, feed 85% kela...",
-        )
-        utterance_to_send = custom_text.strip() if custom_text.strip() else preset.split(" (")[0]
+        with d_col2:
+            st.selectbox(
+                "Simulated Machine State",
+                ["M01_HOLD", "RUNNING", "EMERGENCY_STOP"],
+                key="op_machine_state",
+            )
 
-        # Oversized (min-height: 88px) glove-friendly tactile Palm-Button
-        st.markdown('<div class="palm-btn-scope">', unsafe_allow_html=True)
-        btn_pressed = st.button(
-            "🔴 PUSH-TO-TALK PALM POD (HOLD & SPEAK)",
-            key="palm_ptt_trigger_btn",
-            use_container_width=True,
-            type="primary",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+        with d_col3:
+            preset_utterance = st.selectbox(
+                "Demo Voice Preset",
+                [
+                    "T03 corner 2 badalala, resume kara",
+                    "Machine ka thambla? Tool badlaycha ka?",
+                    "Supervisor la bolva, bore size check karaycha aahe",
+                    "Floor var hammer padla, cut normal aahe",
+                ],
+                index=0,
+            )
+            st.session_state["demo_custom_utterance"] = preset_utterance
 
-        if "last_voice_result" not in st.session_state:
-            st.session_state["last_voice_result"] = {
-                "intent": "CONFIRM_INSERT_SWAP",
-                "spoken_response_marathi": "धन्यवाद! Tool T03 Corner #2 insert swap आणि 85% Feedrate Override confirm झाले आहे. Machine cycle सुरू करण्यासाठी सुरक्षित आहे. (+INR 16,200 वाचवले)",
-                "utterance": "T03 insert corner 2 badalala, resume kara",
-            }
-
-        if btn_pressed:
-            with st.spinner("Validating speech via Gemini Live SanitizedVoiceIntent gate..."):
-                res = _send_voice_utterance(backend_url, utterance_to_send)
-                res["utterance"] = utterance_to_send
-                st.session_state["last_voice_result"] = res
-
-        voice_res = st.session_state["last_voice_result"]
-        intent = voice_res.get("intent", "CONFIRM_INSERT_SWAP")
-        spoken_marathi = voice_res.get("spoken_response_marathi", "")
-        is_confirmed = intent == "CONFIRM_INSERT_SWAP"
-        pill_color = "#10B981" if is_confirmed else "#F59E0B"
-        andon_status = "GREEN (CYCLE START CLEARED)" if is_confirmed else "AMBER (M01 HOLD ACTIVE)"
-
-        st.markdown(
-            f"""
-            <div style="background: #111827; border: 1px solid {pill_color}; border-left: 5px solid {pill_color}; border-radius: 8px; padding: 12px 14px; margin-top: 10px;">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; font-weight: 800; color: #0F172A; background: {pill_color}; padding: 3px 9px; border-radius: 999px;">
-                        Intent: {intent} &bull; Logged to BigQuery
-                    </span>
-                    <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #94A3B8;">
-                        SanitizedVoiceIntent
-                    </span>
-                </div>
-                <div style="font-size: 0.78rem; color: #94A3B8; margin-bottom: 4px;">
-                    🎙️ Operator Utterance: <em style="color:#F8FAFC;">"{voice_res.get('utterance', '')}"</em>
-                </div>
-                <div style="background: #0B1120; border: 1px solid #1E293B; border-radius: 6px; padding: 9px 11px; font-size: 0.92rem; font-weight: 600; color: #F8FAFC; line-height: 1.45;">
-                    🔊 <strong>Marathi Audio Response:</strong><br/>
-                    "{spoken_marathi}"
-                </div>
-                <div style="margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; color: {pill_color}; display: flex; justify-content: space-between;">
-                    <span>RELAY STATUS: {andon_status}</span>
-                    <span>LEDGER: +INR 16,200</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with d_col4:
+            if st.button("Reset PTT State", use_container_width=True):
+                st.session_state["op_ptt_confirmed"] = False
+            if st.button("Switch Role", use_container_width=True):
+                st.session_state["active_station_nav"] = "1. Supervisor Cockpit"
+                st.rerun()

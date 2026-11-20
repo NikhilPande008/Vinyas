@@ -11,8 +11,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 REGION="${GCP_LOCATION:-asia-south1}"
-BILLING_ID="${BILLING_ID:-016D0E-BEBF45-1C4C49}"
-DISPLAY_NAME="Vinyas Buildathon India"
+BILLING_ID="${BILLING_ID:-016344-D7A282-081BCC}"
+DISPLAY_NAME="OpsSense AI Buildathon India"
 SA_NAME="vinyas-backend-sa"
 KEYRING_NAME="vinyas-qa-keyring"
 CRYPTOKEY_NAME="vinyas-cert-signer"
@@ -73,7 +73,11 @@ gcloud config set project "${PROJECT_ID}"
 gcloud config set run/region "${REGION}"
 
 echo "  -> Linking Billing Account (${BILLING_ID}) to ${PROJECT_ID}..."
-gcloud billing projects link "${PROJECT_ID}" --billing-account="${BILLING_ID}"
+gcloud billing projects link "${PROJECT_ID}" \
+  --billing-account="${BILLING_ID}" \
+  --billing-project="${PROJECT_ID}" || \
+gcloud billing projects link "${PROJECT_ID}" \
+  --billing-account="${BILLING_ID}"
 
 APIS=(
   "generativelanguage.googleapis.com"
@@ -88,6 +92,7 @@ APIS=(
   "secretmanager.googleapis.com"
   "iam.googleapis.com"
   "cloudresourcemanager.googleapis.com"
+  "alloydb.googleapis.com"
 )
 
 echo "  -> Enabling required Google Cloud & Gemini APIs..."
@@ -234,16 +239,21 @@ cat > "${ENV_FILE}" <<EOF
 # Team Vinyas (Nikhil Pande & Ravi Mule) — Startup Buildathon India 2026
 # Auto-provisioned via scripts/provision_gcp.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Google AI & Cloud Credentials
+# Google AI & Cloud Credentials (OpsSense AI + Vinyas Unified Config)
 GEMINI_API_KEY="${GEMINI_KEY_STRING}"
+GOOGLE_CLOUD_PROJECT="${PROJECT_ID}"
 GCP_PROJECT_ID="${PROJECT_ID}"
 GCP_LOCATION="${REGION}"
 GOOGLE_APPLICATION_CREDENTIALS="./secrets/vinyas-sa-key.json"
+GCS_BUCKET="${VAULT_BUCKET}"
+GCS_QA_BUCKET="${VAULT_BUCKET}"
 GCS_QA_VAULT_BUCKET="${VAULT_BUCKET}"
+ALLOYDB_DSN="${ALLOYDB_DSN:-}"
+DEMO_FALLBACK_ENABLED=true
 
 # Demo Circuit Breaker & Hardware Source Selection
 DEMO_SAFE_MODE=true
-CIRCUIT_BREAKER_TIMEOUT_SEC=3.2
+CIRCUIT_BREAKER_TIMEOUT_SEC=8.0
 HARDWARE_SOURCE="USB_STEREO_ADC"
 AUDIO_DEVICE_INDEX=
 CAMERA_DEVICE_INDEX=0
@@ -251,7 +261,7 @@ RELAY_SERIAL_PORT=
 RELAY_OPERATING_MODE="DAY1_ANDON_ONLY"
 
 # Current Google GenAI Model Identifiers
-GEMINI_OMNI_MODEL_ID="gemini-2.5-flash"
+GEMINI_OMNI_MODEL_ID="gemini-3-flash-preview"
 EDGE_GEMMA_MODEL_ID="gemma-3n-E4B-it"
 VERNACULAR_GEMMA_MODEL_ID="gemma-3-4b-it"
 GEMINI_IMAGE_MODEL_ID="gemini-3-pro-image-preview"

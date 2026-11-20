@@ -1,14 +1,17 @@
 """
 backend/agents/planner_agent.py
-PPAPPlannerAgent (Column 2 of Verification Trace — "Physics Calculates, AI Diagnoses"):
-1. Uses Gemini 2.5 Flash (`DiagnosticEvidence`) strictly for multimodal fault classification.
+PPAPPlannerAgent (Column 2 of Verification Trace — "Physics Calculates, AI Diagnoses & Explains"):
+1. Uses Gemini 2.5 Flash (`DiagnosticEvidence`) strictly for multimodal fault classification
+   consuming real anti-aliased 16 kHz RIFF WAVE audio, 256x256 Mel-Spectrogram PNG, and CT envelope JSON.
 2. Calls `solve_deterministic_control_plan()` to mathematically calculate & clamp
    Feedrate Override Dial [70..110]%, Spindle Speed Dial [80..115]%, and Relative Chip-Load [0.65..1.15].
-3. Computes INR scrap avoidance & validated 1.6-month (~48 days) net hardware payback via `roi_calculator.py`.
-4. Emits both `RemediationPlan` and backwards-compatible `PPAPRemediationPlan` artifacts.
+3. Calls `translate_vernacular_action_card()` (`gemma-3-4b-it`) to translate the pre-verified dial settings
+   into zero-jargon Marathi, Hindi, and Hinglish Action Cards.
+4. Computes INR scrap avoidance & validated 1.6-month (~48 days) net hardware payback via `roi_calculator.py`.
 """
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 from config.settings import settings
@@ -21,12 +24,10 @@ from backend.models.schemas import (
     Day1NonInvasiveAction,
     Tier2AutomatedFocasPayload,
     VectorSearchMatch,
+    VernacularActionCard,
 )
 from backend.services.gemini_omni_service import GeminiOmniService
-from backend.skills.control_plan_solver import (
-    load_control_plan_limits,
-    solve_deterministic_control_plan,
-)
+from backend.skills.control_plan_solver import solve_deterministic_control_plan
 from backend.skills.roi_calculator import calculate_remediation_roi
 
 logger = logging.getLogger("vinyas_ai.agents.planner")
@@ -49,9 +50,11 @@ class PPAPPlannerAgent:
         incident: MultimodalIncidentPayload,
         vector_match: VectorSearchMatch,
         diagnostic_evidence: Optional[DiagnosticEvidence] = None,
+        audio_wav_16k_bytes: Optional[bytes] = None,
+        mel_spectrogram_png_bytes: Optional[bytes] = None,
     ) -> tuple[RemediationPlan, PPAPRemediationPlan]:
         """
-        Separates AI diagnosis from deterministic physics calculation.
+        Separates AI diagnosis from deterministic physics calculation and Gemma vernacular translation.
         Returns (RemediationPlan, PPAPRemediationPlan).
         """
         tool_id = incident.active_tool_id
@@ -59,21 +62,58 @@ class PPAPPlannerAgent:
         tools_map = self.control_limits.get("tools", self.control_limits)
         tool_cfg = tools_map.get(tool_id, tools_map["T03"])
 
-        evidence = diagnostic_evidence or DiagnosticEvidence(
-            cycle_id=incident.cycle_id,
-            defect_classification="Carbide Insert Flank Wear inducing Regenerative Chatter",
-            detected_harmonic_hz=dsp.dominant_carrier_freq_hz,
-            confidence_score=vector_match.cosine_similarity,
-            is_false_positive=False,
-            evidence_summary=(
-                f"Primary Ch 0 2-8 kHz vibration ratio={dsp.band_power_ratio_2k_8k:.2f}, "
-                f"crest={dsp.spectral_crest_factor:.1f}, coherence booster={dsp.hilbert_envelope_coherence:.2f}."
-            ),
-            recommended_physical_check=f"Inspect Tool {tool_id} insert edge at M01 stop and index Corner #2.",
-            served_from_fallback=settings.DEMO_SAFE_MODE,
-        )
+        t0_diag = time.perf_counter()
+        if diagnostic_evidence is not None:
+            evidence = diagnostic_evidence
+        elif not settings.DEMO_SAFE_MODE and audio_wav_16k_bytes and mel_spectrogram_png_bytes:
+            try:
+                ct_summary_json = json.dumps(
+                    {
+                        "cycle_id": incident.cycle_id,
+                        "ae_rms_g": dsp.ae_rms_g,
+                        "band_power_ratio_2k_8k": dsp.band_power_ratio_2k_8k,
+                        "spectral_crest_factor": dsp.spectral_crest_factor,
+                        "hilbert_envelope_coherence": dsp.hilbert_envelope_coherence,
+                        "ct_ripple_std_amps": dsp.ct_ripple_std_amps,
+                        "dominant_carrier_freq_hz": dsp.dominant_carrier_freq_hz,
+                        "vector_matched_signature": vector_match.matched_signature_id,
+                        "vector_cosine_similarity": vector_match.cosine_similarity,
+                    }
+                )
+                evidence = await self.omni_service.classify_diagnostic_evidence(
+                    audio_wav_16k_bytes=audio_wav_16k_bytes,
+                    mel_spectrogram_png_bytes=mel_spectrogram_png_bytes,
+                    ct_envelope_json_str=ct_summary_json,
+                    machine_context={
+                        "machine_id": incident.machine_id,
+                        "tool_id": tool_id,
+                        "cycle_id": incident.cycle_id,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("GeminiDiagnosticEvidence live call fallback (%s)", exc)
+                evidence = None
+        else:
+            evidence = None
+
+        if evidence is None:
+            evidence = DiagnosticEvidence(
+                cycle_id=incident.cycle_id,
+                defect_classification="Carbide Insert Flank Wear inducing Regenerative Chatter",
+                detected_harmonic_hz=dsp.dominant_carrier_freq_hz,
+                confidence_score=vector_match.cosine_similarity,
+                is_false_positive=False,
+                evidence_summary=(
+                    f"Primary Ch 0 2-8 kHz vibration ratio={dsp.band_power_ratio_2k_8k:.2f}, "
+                    f"crest={dsp.spectral_crest_factor:.1f}, coherence booster={dsp.hilbert_envelope_coherence:.2f}."
+                ),
+                recommended_physical_check=f"Inspect Tool {tool_id} insert edge at M01 stop and index Corner #2.",
+                served_from_fallback=True,
+            )
+        self.last_gemini_diagnostic_latency_ms = round((time.perf_counter() - t0_diag) * 1000.0, 2)
 
         # Physics Calculates: deterministic control plan solver
+        t0_solver = time.perf_counter()
         solution: DeterministicControlSolution = solve_deterministic_control_plan(
             detected_chatter_hz=evidence.detected_harmonic_hz,
             spindle_rpm=int(tool_cfg.get("nominal_rpm", 3800)),
@@ -82,19 +122,21 @@ class PPAPPlannerAgent:
             control_plan_limits=self.control_limits,
             requested_wear_offset_z_microns=12.0,
         )
+        self.last_solver_latency_ms = round((time.perf_counter() - t0_solver) * 1000.0, 3)
+
+        # Gemma Vernacular Action Card translation (Marathi, Hindi, Hinglish)
+        vernacular_card: VernacularActionCard = await self.omni_service.translate_vernacular_action_card(
+            control_solution=solution,
+            detected_harmonic_hz=evidence.detected_harmonic_hz,
+        )
+        self.last_vernacular_card = vernacular_card
+        marathi_card = vernacular_card.marathi
 
         # Economic ROI + validated 1.6-month (~48 days) net hardware payback
         roi = calculate_remediation_roi(
             target_tool_id=tool_id,
             operator_feedrate_dial_pct=solution.operator_feedrate_dial_pct,
             control_limits=self.control_limits,
-        )
-
-        marathi_card = (
-            f"Tool {tool_id} Finishing Pass madhye chatter ({evidence.detected_harmonic_hz:.0f} Hz) aala aahe. "
-            f"M01 Hold var Feedrate Override knob {solution.operator_feedrate_dial_pct}% ani "
-            f"Spindle Speed dial {solution.spindle_speed_dial_pct}% ({solution.target_rpm} RPM) var set kara, "
-            f"ani {tool_id} Insert Corner #2 badla."
         )
 
         focas_reg = f"G10_L11_P{tool_id[1:]}"

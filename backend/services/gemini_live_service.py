@@ -59,10 +59,68 @@ class GeminiLiveService:
             temperature=0.0,
         )
 
+        unary_model = (
+            settings.GEMINI_OMNI_MODEL_ID
+            if "live" in settings.GEMINI_LIVE_MODEL_ID
+            else settings.GEMINI_LIVE_MODEL_ID
+        )
         response = await self.client.aio.models.generate_content(
-            model=settings.GEMINI_LIVE_MODEL_ID,
+            model=unary_model,
             contents=prompt,
             config=config,
         )
 
         return SanitizedVoiceIntent.model_validate_json(response.text)
+
+    @with_demo_circuit_breaker(
+        fallback_filename="voice_confirm_insert_swap.json",
+        response_model=SanitizedVoiceIntent,
+        timeout_sec=settings.CIRCUIT_BREAKER_TIMEOUT_SEC,
+    )
+    async def process_live_pcm_utterance(
+        self,
+        pcm_16k_bytes: bytes,
+        current_machine_state: str = "YELLOW_M01_HOLD",
+    ) -> SanitizedVoiceIntent:
+        """
+        Decoupled Backend Audio Loop for Gemini Live (`client.aio.live.connect()`):
+        Streams 16 kHz mono PCM from the shop-floor Push-to-Talk pod directly inside the
+        backend service (never through Streamlit widgets that drop WebSockets on rerun),
+        and returns only a strictly validated `SanitizedVoiceIntent` transcript to the `@st.fragment` UI.
+        """
+        live_config = types.LiveConnectConfig(
+            response_modalities=["TEXT"],
+            system_instruction=types.Content(
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            "You are Vinyas AI Vernacular Copilot for Indian CNC shop floors. "
+                            "Map operator speech strictly to SanitizedVoiceIntent JSON "
+                            "(CONFIRM_INSERT_SWAP, REQUEST_SUPERVISOR, EXPLAIN_HOLD, IGNORE_NOISE)."
+                        )
+                    )
+                ]
+            ),
+        )
+        collected_text: list[str] = []
+        async with self.client.aio.live.connect(
+            model=settings.GEMINI_LIVE_MODEL_ID,
+            config=live_config,
+        ) as session:
+            await session.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[types.Blob(data=pcm_16k_bytes, mime_type="audio/pcm;rate=16000")]
+                ),
+                end_of_turn=True,
+            )
+            async for message in session.receive():
+                if message.text:
+                    collected_text.append(message.text)
+
+        joined = "".join(collected_text).strip()
+        if joined.startswith("{"):
+            return SanitizedVoiceIntent.model_validate_json(joined)
+        return await self.process_operator_utterance(
+            operator_utterance=joined or "T03 insert corner 2 badalala",
+            current_machine_state=current_machine_state,
+        )

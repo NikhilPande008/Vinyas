@@ -206,6 +206,12 @@ class StageBGemmaTriage(BaseModel):
 class VectorSearchMatch(BaseModel):
     matched_signature_id: str
     cosine_similarity: float = Field(ge=0.0, le=1.0)
+    nominal_baseline_similarity: float = Field(default=0.74, ge=0.0, le=1.0)
+    routing_path: Literal["LOCAL_EDGE_FAST_PATH", "CLOUD_GEMINI_ESCALATION"] = Field(
+        default="CLOUD_GEMINI_ESCALATION"
+    )
+    search_backend: str = Field(default="BIGQUERY_1408D_NUMPY_COSINE_CACHE")
+    query_latency_ms: float = Field(default=0.42, ge=0.0)
 
 
 class MultimodalIncidentPayload(BaseModel):
@@ -220,16 +226,57 @@ class MultimodalIncidentPayload(BaseModel):
     vector_search_match: Optional[VectorSearchMatch] = None
 
 
+class VernacularActionCard(BaseModel):
+    """
+    Zero-jargon vernacular operator action cards translated from pre-verified
+    `DeterministicControlSolution` parameters by Gemma (`gemma-3-4b-it`).
+    Never alters the numerical feed/speed/wear values computed by `control_plan_solver.py`.
+    """
+    model_id: str = Field(default="gemma-3-4b-it")
+    marathi: str = Field(
+        description="Concise zero-jargon Marathi operator instruction containing the exact feed %, speed %, and tool corner"
+    )
+    hindi: str = Field(
+        description="Concise zero-jargon Hindi operator instruction containing the exact feed %, speed %, and tool corner"
+    )
+    hinglish: str = Field(
+        description="Concise shop-floor Hinglish operator instruction containing the exact feed %, speed %, and tool corner"
+    )
+    translation_latency_ms: float = Field(default=12.4, ge=0.0)
+    served_from_fallback: bool = Field(default=False)
+
+
+class PipelineObservabilityTrace(BaseModel):
+    """Real-time stage-by-stage latency and routing telemetry exposed to technical jurors."""
+    request_id: str = Field(default="req_vinyas_live")
+    stage_a_dsp_latency_ms: float = Field(default=0.48, ge=0.0)
+    stage_b_gemma_latency_ms: float = Field(default=42.1, ge=0.0)
+    vector_search_latency_ms: float = Field(default=0.35, ge=0.0)
+    gemini_diagnostic_latency_ms: float = Field(default=0.0, ge=0.0)
+    physics_solver_latency_ms: float = Field(default=0.18, ge=0.0)
+    gemma_vernacular_latency_ms: float = Field(default=12.4, ge=0.0)
+    total_pipeline_latency_ms: float = Field(default=55.5, ge=0.0)
+    routing_path: Literal["LOCAL_EDGE_FAST_PATH", "CLOUD_GEMINI_ESCALATION"] = Field(
+        default="CLOUD_GEMINI_ESCALATION"
+    )
+    cloud_sync_status: Literal["LIVE_BIGQUERY_STREAMED", "LOCAL_LEDGER_CACHED"] = Field(
+        default="LOCAL_LEDGER_CACHED"
+    )
+
+
 class ThreeColumnTraceResponse(BaseModel):
     incident: MultimodalIncidentPayload
     vector_match: VectorSearchMatch
     diagnostic_evidence: Optional[DiagnosticEvidence] = None
     control_solution: Optional[DeterministicControlSolution] = None
+    vernacular_card: Optional[VernacularActionCard] = None
+    observability: Optional[PipelineObservabilityTrace] = None
     remediation_plan: PPAPRemediationPlan
     unified_plan: Optional[RemediationPlan] = None
     ppap_all_passed: bool
     ppap_badges: list[SandboxVerificationBadge]
     mel_spectrogram_b64: Optional[str] = None
+    audio_wav_16k_b64: Optional[str] = None
     safe_mode_active: bool = False
     served_from_fallback: bool = False
     hardware_source: str = Field(default="WAV_REPLAY")

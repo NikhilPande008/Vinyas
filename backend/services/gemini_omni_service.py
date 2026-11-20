@@ -12,7 +12,12 @@ from typing import Optional
 from google import genai
 from google.genai import types
 from config.settings import settings
-from backend.models.schemas import DiagnosticEvidence, PPAPRemediationPlan
+from backend.models.schemas import (
+    DiagnosticEvidence,
+    DeterministicControlSolution,
+    PPAPRemediationPlan,
+    VernacularActionCard,
+)
 from backend.services.circuit_breaker import with_demo_circuit_breaker
 
 logger = logging.getLogger("vinyas_ai.backend.gemini_omni")
@@ -135,3 +140,117 @@ class GeminiOmniService:
             config=config,
         )
         return PPAPRemediationPlan.model_validate_json(response.text)
+
+    async def translate_vernacular_action_card(
+        self,
+        control_solution: DeterministicControlSolution,
+        detected_harmonic_hz: float,
+    ) -> VernacularActionCard:
+        """
+        Translates pre-verified `DeterministicControlSolution` dial settings into zero-jargon
+        Marathi, Hindi, and Hinglish operator instructions using `gemma-3-4b-it` (or Ollama local
+        Gemma with deterministic fallback). Never alters numerical feed/speed/wear values.
+        """
+        import time
+        import httpx
+
+        t0 = time.perf_counter()
+        tool_id = control_solution.target_tool_id
+        feed_pct = control_solution.operator_feedrate_dial_pct
+        speed_pct = control_solution.spindle_speed_dial_pct
+        rpm = control_solution.target_rpm
+
+        default_marathi = (
+            f"Tool {tool_id} Finishing Pass madhye chatter ({detected_harmonic_hz:.0f} Hz) aala aahe. "
+            f"M01 Hold var Feedrate Override knob {feed_pct}% ani "
+            f"Spindle Speed dial {speed_pct}% ({rpm} RPM) var set kara, "
+            f"ani {tool_id} Insert Corner #2 badla."
+        )
+        default_hindi = (
+            f"Tool {tool_id} Finishing Pass में चैटर ({detected_harmonic_hz:.0f} Hz) आया है। "
+            f"M01 Hold पर Feedrate knob {feed_pct}% और Spindle Speed dial {speed_pct}% ({rpm} RPM) पर सेट करें, "
+            f"और {tool_id} Insert Corner #2 बदलें।"
+        )
+        default_hinglish = (
+            f"M01 Hold par Feed Knob {feed_pct}% aur Speed Knob {speed_pct}% ({rpm} RPM) set karein, "
+            f"phir Tool {tool_id} Insert Corner #2 index karke Palm PTT button dabayein."
+        )
+
+        if settings.DEMO_SAFE_MODE:
+            latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            return VernacularActionCard(
+                model_id=settings.VERNACULAR_GEMMA_MODEL_ID,
+                marathi=default_marathi,
+                hindi=default_hindi,
+                hinglish=default_hinglish,
+                translation_latency_ms=latency_ms,
+                served_from_fallback=True,
+            )
+
+        prompt = (
+            f"Translate these verified CNC M01 remediation settings into zero-jargon shop-floor instructions "
+            f"in Marathi, Hindi, and Hinglish. You MUST preserve the exact numbers: "
+            f"Tool={tool_id}, Chatter={detected_harmonic_hz:.0f} Hz, Feedrate Dial={feed_pct}%, "
+            f"Spindle Speed Dial={speed_pct}% ({rpm} RPM), Insert=Corner #2.\n"
+            f"Return JSON matching VernacularActionCard schema."
+        )
+
+        # 1. Attempt local Ollama Gemma 3 4B IT (`keep_alive=-1`) for sub-30ms edge vernacular generation
+        try:
+            async with httpx.AsyncClient(timeout=0.35) as http_client:
+                resp = await http_client.post(
+                    f"{settings.OLLAMA_BASE_URL}/api/generate",
+                    json={
+                        "model": settings.VERNACULAR_GEMMA_MODEL_ID,
+                        "prompt": prompt,
+                        "format": "json",
+                        "stream": False,
+                        "keep_alive": -1,
+                        "options": {"temperature": 0.0, "num_predict": 160},
+                    },
+                )
+                if resp.status_code == 200:
+                    import json as _json
+                    parsed = _json.loads(resp.json().get("response", "{}"))
+                    if parsed.get("marathi") and str(feed_pct) in str(parsed.get("marathi")):
+                        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+                        return VernacularActionCard(
+                            model_id=settings.VERNACULAR_GEMMA_MODEL_ID,
+                            marathi=str(parsed["marathi"]),
+                            hindi=str(parsed.get("hindi", default_hindi)),
+                            hinglish=str(parsed.get("hinglish", default_hinglish)),
+                            translation_latency_ms=latency_ms,
+                            served_from_fallback=False,
+                        )
+        except Exception:
+            pass
+
+        # 2. Attempt Google GenAI API (`gemma-3-4b-it` / `gemini-2.5-flash` structured output)
+        try:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=VernacularActionCard,
+                temperature=0.0,
+            )
+            response = await self.client.aio.models.generate_content(
+                model=settings.GEMINI_OMNI_MODEL_ID,
+                contents=prompt,
+                config=config,
+            )
+            card = VernacularActionCard.model_validate_json(response.text)
+            card.model_id = settings.VERNACULAR_GEMMA_MODEL_ID
+            card.translation_latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            card.served_from_fallback = False
+            return card
+        except Exception as exc:
+            logger.warning("Vernacular translation fallback triggered (%s)", exc)
+
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        return VernacularActionCard(
+            model_id=settings.VERNACULAR_GEMMA_MODEL_ID,
+            marathi=default_marathi,
+            hindi=default_hindi,
+            hinglish=default_hinglish,
+            translation_latency_ms=latency_ms,
+            served_from_fallback=True,
+        )

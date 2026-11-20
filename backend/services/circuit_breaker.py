@@ -63,9 +63,10 @@ def with_demo_circuit_breaker(
                 return validated
             except (asyncio.TimeoutError, Exception) as exc:
                 logger.warning(
-                    "Circuit breaker tripped on %s (%s). Returning validated %s from %s (served_from_fallback=True)",
+                    "Circuit breaker tripped on %s (%s: %s). Returning validated %s from %s (served_from_fallback=True)",
                     func.__name__,
                     type(exc).__name__,
+                    exc,
                     response_model.__name__,
                     fallback_filename,
                 )

@@ -28,12 +28,25 @@ try:
 except ImportError:
     kms = None
 
+try:
+    from google.cloud import storage  # type: ignore
+except ImportError:
+    storage = None
+
 logger = logging.getLogger("vinyas_ai.backend.kms_certificate")
 
 
 class KMSCertificateService:
     def __init__(self, kms_key_resource: Optional[str] = None):
-        self.kms_key_resource = kms_key_resource or settings.CLOUD_KMS_KEY_RESOURCE
+        if kms_key_resource:
+            self.kms_key_resource = kms_key_resource
+        elif settings.KMS_KEY_RING and settings.KMS_CRYPTO_KEY and settings.GCP_PROJECT_ID:
+            self.kms_key_resource = (
+                f"projects/{settings.GCP_PROJECT_ID}/locations/{settings.GCP_LOCATION}/"
+                f"keyRings/{settings.KMS_KEY_RING}/cryptoKeys/{settings.KMS_CRYPTO_KEY}/cryptoKeyVersions/1"
+            )
+        else:
+            self.kms_key_resource = settings.CLOUD_KMS_KEY_RESOURCE
         # Deterministic local ECDSA P-256 fallback keypair for offline verification
         self._local_private_key = ec.generate_private_key(ec.SECP256R1())
         self._local_public_key = self._local_private_key.public_key()
@@ -212,6 +225,21 @@ class KMSCertificateService:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(png_bytes)
 
+        gcs_vault_uri: Optional[str] = None
+        target_bucket = settings.GCS_QA_BUCKET or settings.GCS_QA_VAULT_BUCKET
+        if not settings.DEMO_SAFE_MODE and storage is not None and target_bucket:
+            try:
+                bucket_name = target_bucket.replace("gs://", "").strip("/")
+                blob_name = f"certificates/{part_id}_{summary.cycle_id}_{raw_frame_sha256[:12]}.png"
+                storage_client = storage.Client(project=settings.GCP_PROJECT_ID)
+                bucket = storage_client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+                blob.upload_from_string(png_bytes, content_type="image/png")
+                gcs_vault_uri = f"gs://{bucket_name}/{blob_name}"
+                logger.info("Archived signed QA certificate to GCS Vault: %s", gcs_vault_uri)
+            except Exception as exc:
+                logger.warning("GCS QA Vault upload skipped (%s)", exc)
+
         return {
             "certificate_png_bytes": png_bytes,
             "raw_frame_sha256": raw_frame_sha256,
@@ -219,4 +247,5 @@ class KMSCertificateService:
             "signing_backend": signing_backend,
             "canonical_payload_bytes": payload_bytes,
             "cycle_id": summary.cycle_id,
+            "gcs_vault_uri": gcs_vault_uri,
         }

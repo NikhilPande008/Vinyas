@@ -75,13 +75,17 @@ def _fetch_or_fallback_incident(backend_url: str) -> dict[str, Any]:
         },
     }
 
-    try:
-        with httpx.Client(timeout=2.5) as client:
-            resp = client.post(f"{backend_url}/api/v1/incidents/process", json=incident_payload)
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
+    candidates = [backend_url.rstrip("/")]
+    if settings.BACKEND_API_URL.rstrip("/") not in candidates:
+        candidates.append(settings.BACKEND_API_URL.rstrip("/"))
+    for target_url in candidates:
+        try:
+            with httpx.Client(timeout=2.5) as client:
+                resp = client.post(f"{target_url}/api/v1/incidents/process", json=incident_payload)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception:
+            continue
 
     sol = solve_deterministic_control_plan(
         detected_chatter_hz=4210.0,
@@ -109,19 +113,27 @@ def _fetch_or_fallback_incident(backend_url: str) -> dict[str, Any]:
 
 
 def _fetch_shift_aggregates(backend_url: str) -> dict[str, Any]:
-    try:
-        with httpx.Client(timeout=2.0) as client:
-            resp = client.get(f"{backend_url}/api/v1/telemetry/shift-aggregates")
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
+    candidates = [backend_url.rstrip("/")]
+    if settings.BACKEND_API_URL.rstrip("/") not in candidates:
+        candidates.append(settings.BACKEND_API_URL.rstrip("/"))
+    for target_url in candidates:
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                resp = client.get(f"{target_url}/api/v1/telemetry/shift-aggregates")
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception:
+            continue
     return {
         "total_savings_inr": 129600,
         "total_holds_preempted": 8,
         "total_catastrophic_stops": 0,
         "parts_inspected_shift": 142,
         "oee_quality_rate_pct": 99.4,
+        "edge_suppressed_pct": 88,
+        "cloud_escalated_pct": 12,
+        "similarity_threshold": 0.88,
+        "bq_dataset": settings.BQ_DATASET,
         "headline_display": "+INR 129,600",
     }
 
@@ -144,6 +156,35 @@ def render_supervisor_cockpit(backend_url: str = "http://localhost:8000"):
     total_saved_inr = max(int(aggregates.get("total_savings_inr", 129600)), 129600)
     oee_pct = aggregates.get("oee_quality_rate_pct", 99.4)
     latency_ms = dsp.get("execution_latency_ms", 1.12)
+    edge_suppressed_pct = int(aggregates.get("edge_suppressed_pct", 88))
+    cloud_escalated_pct = int(aggregates.get("cloud_escalated_pct", 12))
+    served_from_fallback = bool(trace.get("served_from_fallback", settings.DEMO_SAFE_MODE))
+    st.session_state["served_from_fallback"] = served_from_fallback
+    mode_tag = "FALLBACK" if (settings.DEMO_SAFE_MODE or served_from_fallback) else "LIVE"
+    mode_badge_color = "#F59E0B" if mode_tag == "FALLBACK" else "#10B981"
+
+    # Prominent Live Edge vs. Cloud Telemetry Routing Banner
+    st.markdown(
+        f"""
+        <div style="background: linear-gradient(90deg, rgba(16, 185, 129, 0.14) 0%, rgba(56, 189, 248, 0.12) 60%, rgba(15, 23, 42, 0.95) 100%);
+                    border: 1px solid #1E293B; border-left: 5px solid #10B981; border-radius: 8px;
+                    padding: 8px 14px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;
+                    font-family: 'JetBrains Mono', monospace; font-size: 0.79rem;">
+            <div>
+                <span style="color: #94A3B8; font-weight: 700; text-transform: uppercase; margin-right: 8px;">Live Telemetry Routing:</span>
+                <span>Edge Suppressed (Nominal &ge;0.88): <strong style="color:#10B981;">{edge_suppressed_pct}%</strong></span>
+                <span style="color:#475569; margin: 0 8px;">|</span>
+                <span>Escalated to Cloud Run (&lt;0.88): <strong style="color:#38BDF8;">{cloud_escalated_pct}%</strong></span>
+                <span style="color:#475569; margin: 0 8px;">|</span>
+                <span>Mode: <strong style="color:{mode_badge_color};">{mode_tag}</strong></span>
+            </div>
+            <div style="color: #94A3B8; font-size: 0.73rem;">
+                BigQuery Vector Store: <code style="color:#38BDF8;">{settings.BQ_DATASET}.{settings.BIGQUERY_VECTOR_TABLE}</code> (&lt;5 ms NumPy Cosine Cache)
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Top KPI Strip (4 Equal Responsive Flex Cards — Never Truncates)
     kpi_html = (
@@ -241,10 +282,10 @@ def render_supervisor_cockpit(backend_url: str = "http://localhost:8000"):
             f"""
             <div style="background: rgba(16, 185, 129, 0.10); border: 1px solid #10B981; border-left: 4px solid #10B981; border-radius: 6px; padding: 8px 10px; margin-top: 4px;">
                 <div style="font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: #34D399; letter-spacing: 0.04em;">
-                    Vertex AI Vector Search (1408-D Alloy Index)
+                    1. Extractor Evidence • BigQuery + 1408-D NumPy Cosine Cache (&lt;5 ms)
                 </div>
                 <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; font-weight: 800; color: #F8FAFC; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                    {match_id} &bull; <span style="color:#10B981;">{match_pct}% Match</span>
+                    {match_id} &bull; <span style="color:#10B981;">{match_pct}% Match</span> &bull; <span style="color:#38BDF8;">{vector.get("routing_path", "CLOUD_GEMINI_ESCALATION")}</span>
                 </div>
             </div>
             """,
@@ -369,23 +410,43 @@ def render_supervisor_cockpit(backend_url: str = "http://localhost:8000"):
             for label, val, _ok in guardrail_rows
         )
 
+        marathi_card_text = (
+            (trace.get("vernacular_card") or {}).get("marathi")
+            or (trace.get("unified_plan") or {}).get("operator_card_marathi")
+            or (plan.get("day1_manual_action") or {}).get("operator_card_marathi")
+            or f"Tool T03 Finishing Pass madhye chatter ({carrier_hz:,.0f} Hz) aala aahe. M01 Hold var Feedrate Override knob {feed_dial}% ani Spindle Speed dial {speed_dial}% ({target_rpm} RPM) var set kara, ani T03 Insert Corner #2 badla."
+        )
+        obs = trace.get("observability") or {}
+        vec_ms = float(obs.get("vector_search_latency_ms", vector.get("query_latency_ms", 0.35)))
+        solver_ms = float(obs.get("physics_solver_latency_ms", 0.15))
+        gemma_vern_ms = float(obs.get("gemma_vernacular_latency_ms", 0.05))
+        sync_status = obs.get("cloud_sync_status", "LOCAL_LEDGER_CACHED" if served_from_fallback else "LIVE_BIGQUERY_STREAMED")
+
         st.markdown(
             f"""
             <div class="hmi-panel">
                 <div class="hmi-section-header">
-                    <span class="hmi-section-title">3. PPAP Safety Guardrails</span>
+                    <span class="hmi-section-title">3. PPAP Guardrails &amp; Gemma Vernacular Card</span>
                     <span class="hmi-pill-tag emerald">IATF 16949</span>
                 </div>
                 {banner_html}
                 {rows_html}
+                <div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #1E293B; border-left: 4px solid #38BDF8; border-radius: 6px; padding: 8px 10px; margin: 8px 0;">
+                    <div style="font-size: 0.69rem; font-weight: 700; text-transform: uppercase; color: #38BDF8; letter-spacing: 0.04em;">
+                        Gemma Vernacular Action Card ({settings.VERNACULAR_GEMMA_MODEL_ID})
+                    </div>
+                    <div style="font-size: 0.78rem; color: #F8FAFC; margin-top: 3px; line-height: 1.4;">
+                        &ldquo;{marathi_card_text}&rdquo;
+                    </div>
+                </div>
                 <div class="security-lock-badge">
                     <span>🔒 <strong>Direct G-Code Rewriting:</strong></span>
                     <span style="font-family: 'JetBrains Mono', monospace; font-weight: 800; color: #EF4444;">BLOCKED (IATF 16949)</span>
                 </div>
-                <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #1E293B; font-size: 0.74rem; color: #94A3B8; font-family: 'JetBrains Mono', monospace; line-height: 1.6;">
+                <div style="margin-top: 8px; padding-top: 6px; border-top: 1px solid #1E293B; font-size: 0.72rem; color: #94A3B8; font-family: 'JetBrains Mono', monospace; line-height: 1.55;">
                     <div>Relay Binding : <strong style="color:#F59E0B;">{settings.RELAY_OPERATING_MODE}</strong></div>
-                    <div>Edge Triage   : <strong style="color:#38BDF8;">{settings.EDGE_GEMMA_MODEL_ID}</strong></div>
-                    <div>Vernacular Op : <strong style="color:#10B981;">{settings.VERNACULAR_GEMMA_MODEL_ID}</strong></div>
+                    <div>Stage Latencies: <strong style="color:#38BDF8;">Vec {vec_ms:.2f}ms &bull; Solver {solver_ms:.2f}ms &bull; Gemma {gemma_vern_ms:.2f}ms</strong></div>
+                    <div>BigQuery Sync : <strong style="color:#10B981;">{sync_status}</strong></div>
                 </div>
             </div>
             """,

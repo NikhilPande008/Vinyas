@@ -21,6 +21,11 @@ from backend.services.bigquery_logger import BigQueryLogger
 from config.settings import settings
 
 TABLE_SCHEMAS = {
+    "alloy_signatures_1408d": (
+        "signature_id:STRING,description:STRING,nominal_carrier_hz:FLOAT,"
+        "nominal_coherence:FLOAT,nominal_ae_rms:FLOAT,is_nominal_baseline:BOOLEAN,"
+        "embedding_dim:INTEGER,updated_utc:TIMESTAMP"
+    ),
     "machine_cycles": (
         "cycle_id:STRING,timestamp_utc:TIMESTAMP,machine_id:STRING,tool_id:STRING,"
         "stage_a_state:STRING,peak_vibration_rms_g:FLOAT,band_power_ratio_2k_8k:FLOAT,"
