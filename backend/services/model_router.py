@@ -132,6 +132,29 @@ def _strip_json_fences(raw: str) -> str:
     return txt
 
 
+def _to_jpeg_bytes(raw_bytes: bytes, quality: int = 82) -> tuple[bytes, str]:
+    """Compress PNG/image bytes to JPEG for faster multimodal upload; fall back to PNG on error."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            rgb = img.convert("RGB")
+            buf = io.BytesIO()
+            rgb.save(buf, format="JPEG", quality=quality, optimize=True)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return raw_bytes, "image/png"
+
+
+def _config_for_model(model_id: str, config: Optional[Any]) -> Optional[Any]:
+    """Strip thinking_config for Gemma models that do not support it."""
+    if config is None or genai_types is None:
+        return config
+    if model_id.lower().startswith("gemma") and getattr(config, "thinking_config", None) is not None:
+        return config.model_copy(update={"thinking_config": None})
+    return config
+
+
 _T1B_LINE_GUIDE: dict[str, dict[str, str]] = {
     "PCB": {
         "subject": "a 4-sided QFP IC soldered to an automotive SMT PCB",
@@ -221,7 +244,7 @@ class GoogleModelRouter:
         if self._client is None and genai is not None and self.settings.gemini_api_key:
             try:
                 http_opts = (
-                    genai_types.HttpOptions(timeout=12000)
+                    genai_types.HttpOptions(timeout=25000)
                     if genai_types is not None and hasattr(genai_types, "HttpOptions")
                     else None
                 )
@@ -279,15 +302,23 @@ class GoogleModelRouter:
             return None, attempt
 
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
+            effective_cfg = _config_for_model(model_id, config)
+            aio_client = getattr(self._client, "aio", None)
+            aio_models = getattr(aio_client, "models", None) if aio_client is not None else None
+            if aio_models is not None and hasattr(aio_models, "generate_content"):
+                coro = aio_models.generate_content(
+                    model=model_id,
+                    contents=contents,
+                    config=effective_cfg,
+                )
+            else:
+                coro = asyncio.to_thread(
                     self._client.models.generate_content,
                     model=model_id,
                     contents=contents,
-                    config=config,
-                ),
-                timeout=timeout_sec,
-            )
+                    config=effective_cfg,
+                )
+            response = await asyncio.wait_for(coro, timeout=timeout_sec)
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             in_tok, out_tok = _extract_tokens(response)
             if response and getattr(response, "text", None):
@@ -455,11 +486,16 @@ class GoogleModelRouter:
 
         if not force_fallback and self._client is not None and genai_types is not None:
             prompt = build_t1b_prompt(line, line_meta, t1a_features, t1a_flags)
-            image_part = genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png")
-            cfg = genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            )
+            img_bytes, img_mime = _to_jpeg_bytes(raw_image_bytes)
+            image_part = genai_types.Part.from_bytes(data=img_bytes, mime_type=img_mime)
+            cfg_kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 260,
+            }
+            if hasattr(genai_types, "ThinkingConfig"):
+                cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            cfg = genai_types.GenerateContentConfig(**cfg_kwargs)
             parsed, used_model, attempts = await self._run_staggered_hedge(
                 stage="T1B_GATE",
                 candidates=self.settings.t1b_candidates,
@@ -545,9 +581,11 @@ class GoogleModelRouter:
             "- Only cite numeric parameters (torques, temperatures, ramp rates, gas flow, tolerances) that appear in the retrieved SOPs or skill references.\n"
             "- Provide at least 2 concrete evidence items citing their source."
         )
-        parts: list[Any] = [genai_types.Part.from_bytes(data=raw_image_bytes, mime_type="image/png")]
+        img_bytes, img_mime = _to_jpeg_bytes(raw_image_bytes)
+        parts: list[Any] = [genai_types.Part.from_bytes(data=img_bytes, mime_type=img_mime)]
         if envelope_png_bytes:
-            parts.append(genai_types.Part.from_bytes(data=envelope_png_bytes, mime_type="image/png"))
+            env_bytes, env_mime = _to_jpeg_bytes(envelope_png_bytes)
+            parts.append(genai_types.Part.from_bytes(data=env_bytes, mime_type=env_mime))
         parts.append(prompt)
         return parts
 
@@ -657,18 +695,22 @@ class GoogleModelRouter:
                 active_skill=active_skill,
                 language=language,
             )
-            cfg = genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=Tier2ModelOutput,
-                temperature=0.15,
-            )
+            t2_cfg_kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "response_schema": Tier2ModelOutput,
+                "temperature": 0.15,
+                "max_output_tokens": 900,
+            }
+            if hasattr(genai_types, "ThinkingConfig"):
+                t2_cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            cfg = genai_types.GenerateContentConfig(**t2_cfg_kwargs)
             parsed, used_model, attempts = await self._run_hedged_tier2(
                 contents=contents,
                 config=cfg,
                 primary_model=self.settings.tier2_primary_model,
                 runner_up_model=self.settings.tier2_fallback_model,
                 hedge_delay_sec=self.settings.tier2_hedge_delay_sec,
-                timeout_sec=12.0,
+                timeout_sec=20.0,
             )
             if parsed is not None and used_model is not None:
                 matched_sop_id = (
@@ -810,7 +852,7 @@ class GoogleModelRouter:
         attempts: list[ModelAttempt] = []
         lang_name = {"en-IN": "English", "hi-IN": "Hindi", "mr-IN": "Marathi"}.get(request.language, "English")
         prompt = (
-            f"Answer in {lang_name}, max 3 short sentences, cite SOP {matched_sop.id}, "
+            f"Answer in {lang_name}, max 2 very short sentences (~20 words), cite SOP {matched_sop.id}, "
             "and ONLY use numeric values that appear in the SOP below.\n"
             f"SOP [{matched_sop.id}] ({matched_sop.title}): {matched_sop.sop_markdown}\n"
             f"Spec: {matched_sop.torque_spec}\n"
@@ -826,7 +868,7 @@ class GoogleModelRouter:
                     response_modalities=["AUDIO"],
                     output_audio_transcription=genai_types.AudioTranscriptionConfig(),
                 )
-                async with asyncio.timeout(15.0):
+                async with asyncio.timeout(22.0):
                     async with self._client.aio.live.connect(
                         model=self.settings.tier4_live_copilot_model,
                         config=live_cfg,
@@ -906,14 +948,18 @@ class GoogleModelRouter:
             text_models = [
                 m for m in (self.settings.tier4_fallback_model, self.settings.tier4_second_fallback_model) if m
             ]
+            t4_fb_kwargs: dict[str, Any] = {"temperature": 0.15, "max_output_tokens": 220}
+            if hasattr(genai_types, "ThinkingConfig"):
+                t4_fb_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+            t4_fb_cfg = genai_types.GenerateContentConfig(**t4_fb_kwargs)
             resp, used_model, fb_attempts = await self._run_staggered_hedge(
                 stage="T4_COPILOT",
                 candidates=list(dict.fromkeys(text_models)),
                 contents=prompt,
-                config=None,
+                config=t4_fb_cfg,
                 parse_fn=lambda text: _NonEmptyText(text),
                 stagger_sec=3.0,
-                total_timeout_sec=9.0,
+                total_timeout_sec=12.0,
             )
             if resp is not None:
                 resp = SimpleNamespace(text=resp.text)
