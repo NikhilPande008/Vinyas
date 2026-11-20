@@ -42,16 +42,18 @@ class Settings(BaseSettings):
     )
 
     # Verified Google AI model routing configuration (see eval/model_selection.md)
-    tier1_visual_gate_model: str = "gemma-4-26b-a4b-it"
-    tier1_fallback_model: str = "gemini-3.1-flash-lite"
-    tier1_second_fallback_model: str = ""
+    # Tier-1B hedge order chosen by eval/visual_gate_benchmark.md (decision rule fixed before the run)
+    tier1_visual_gate_model: str = "gemini-3.5-flash-lite"
+    tier1_fallback_model: str = "gemma-4-26b-a4b-it"
+    tier1_second_fallback_model: str = "gemini-3.1-flash-lite"
     tier1_hedge_delay_sec: float = 3.0
     tier1_total_timeout_sec: float = 12.0
     tier2_primary_model: str = "gemini-3.1-flash-lite"
-    tier2_fallback_model: str = "gemini-3.8-flash"
-    tier2_hedge_delay_sec: float = 6.0
+    tier2_fallback_model: str = "gemini-3.5-flash-lite"  # eval/model_selection.md run 2; 3.8-flash had no quota
+    tier2_hedge_delay_sec: float = 5.7
     tier4_live_copilot_model: str = "gemini-3.8-live"
     tier4_fallback_model: str = "gemini-3.1-flash-lite"
+    tier4_second_fallback_model: str = "gemini-3.5-flash-lite"
     embedding_model: str = "gemini-embedding-2"
     embedding_dim: int = 768
     wo_extract_model: str = "gemini-3.1-flash-lite"

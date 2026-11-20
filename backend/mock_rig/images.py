@@ -135,20 +135,47 @@ def generate_pcb_image(
 
     # Draw defect features
     if defect_class == "SOLDER_BRIDGE":
+        # A solder bridge forms where the lead feet meet the pads (outer end), as an irregular,
+        # shiny solder mass joining 3 adjacent leads. Its shape jitter uses a local RNG derived
+        # from the defect position so the sample's main RNG stream (telemetry, noise) is unchanged.
         p0 = -body_half + 12 + defect_pin * pitch
         p1 = -body_half + 12 + (defect_pin + 2) * pitch
-        blob_col = (232, 238, 246)
-        blob_edge = (162, 174, 188)
-        if defect_side == 0:
-            box = [int(cx + p0 - 4), cy - body_half - 28, int(cx + p1 + 4), cy - body_half - 4]
-        elif defect_side == 1:
-            box = [int(cx + p0 - 4), cy + body_half + 4, int(cx + p1 + 4), cy + body_half + 28]
-        elif defect_side == 2:
-            box = [cx - body_half - 28, int(cy + p0 - 4), cx - body_half - 4, int(cy + p1 + 4)]
-        else:
-            box = [cx + body_half + 4, int(cy + p0 - 4), cx + body_half + 28, int(cy + p1 + 4)]
-        draw.rounded_rectangle(box, radius=7, fill=blob_col, outline=blob_edge, width=2)
-        gt_bbox_px = [box[1] - 10, box[0] - 10, box[3] + 10, box[2] + 10]
+        local = np.random.default_rng(defect_pin * 31 + defect_side * 7 + 2026)
+        near, far = 13, pad_len - 1  # distance from the package body: the lead-foot / pad zone
+
+        def _to_xy(along: float, out: float) -> tuple[float, float]:
+            if defect_side == 0:
+                return cx + along, cy - body_half - out
+            if defect_side == 1:
+                return cx + along, cy + body_half + out
+            if defect_side == 2:
+                return cx - body_half - out, cy + along
+            return cx + body_half + out, cy + along
+
+        overlay = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        n_lobes = 7
+        for k in range(n_lobes):
+            along = p0 - 3 + (p1 - p0 + 6) * k / (n_lobes - 1) + float(local.uniform(-1.5, 1.5))
+            out = float(local.uniform(near + 4, far - 4))
+            rx, ry = float(local.uniform(6, 9)), float(local.uniform(7, 10))
+            if defect_side in (2, 3):
+                rx, ry = ry, rx
+            x, y = _to_xy(along, out)
+            odraw.ellipse([x - rx, y - ry, x + rx, y + ry], fill=(150, 156, 164, 255))
+        for k in range(n_lobes - 2):  # brighter core
+            along = p0 + (p1 - p0) * k / (n_lobes - 3)
+            x, y = _to_xy(along, (near + far) / 2)
+            odraw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(196, 202, 210, 255))
+        hx, hy = _to_xy(p0 + (p1 - p0) * 0.35, (near + far) / 2 - 2)
+        odraw.ellipse([hx - 3, hy - 2, hx + 4, hy + 2], fill=(246, 248, 252, 255))  # specular highlight
+        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=0.9))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        xa, ya = _to_xy(p0 - 12, near - 2)
+        xb, yb = _to_xy(p1 + 12, far + 4)
+        gt_bbox_px = [int(min(ya, yb)) - 6, int(min(xa, xb)) - 6, int(max(ya, yb)) + 6, int(max(xa, xb)) + 6]
 
     elif defect_class == "INSUFFICIENT_SOLDER":
         p0 = -body_half + 12 + defect_pin * pitch

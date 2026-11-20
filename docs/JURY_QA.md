@@ -3,13 +3,13 @@
 1. **Which model produced this output?**
    Every stage returns a `StageProvenance` object naming the exact `model_id` (or `DETERMINISTIC` / `FALLBACK_RULES`), status, latency, and token counts; in Engineer view, the "Attempts trace" disclosure shows every model tried in order.
 2. **Upload a healthy part / a defect: what happens?**
-   Custom uploads bypass `mock_rig`, run through deterministic T1-A checks (using the user's selected telemetry preset, nominal by default) and T1-B (`gemma-4-26b-a4b-it`), and escalate only if a gate flags an anomaly or fails; no scenario name overrides the verdict.
+   Custom uploads bypass `mock_rig`, run through deterministic T1-A checks (using the user's selected telemetry preset, nominal by default) and the T1-B visual gate (hedged: `gemini-3.5-flash-lite`, then `gemma-4-26b-a4b-it`, then `gemini-3.1-flash-lite`), and escalate only if a gate flags an anomaly or every visual model is unavailable; no scenario name overrides the verdict. For PCB and weld uploads the image decides; for CNC the bearing is not visible, so a CNC fault needs vibration telemetry (the UI offers presets). Measured: `eval/visual_gate_benchmark.md`.
 3. **Show the BPFO maths.**
    In `backend/mock_rig/vibration.py` and `backend/dsp/envelope.py`, `BPFO = (n/2)·f_r·(1 − (d/D)·cos α)`. For a representative 7014C-class bearing (`n=20, d=11.1 mm, D=90 mm, α=15°`) at `5,400 rpm` (`f_r=90 Hz`), `BPFO ≈ 793 Hz`. Impacts excite a `~4.2 kHz` structural resonance, which we demodulate via `2–8 kHz` Butterworth bandpass → `|hilbert|` envelope → FFT.
 4. **Why vision isn't used for bearings, and who owns the quality decision?**
    A rolling-element bearing sits inside the assembled spindle housing, so a camera cannot see raceway spalling — CNC detection is vibration-led. On every line, the AI only recommends; a human QE or Supervisor must record `RELEASE / HOLD / REWORK / SCRAP` before a work order can be logged, and nothing actuates a machine.
 5. **Why an LLM at Tier-1 at all?**
-   Deterministic DSP (`T1-A`) handles periodic impacts and process windows in milliseconds at zero token cost; `gemma-4-26b-a4b-it` (`T1-B`, cloud-served stand-in for an on-prem Gemma edge model) screens optical defects (bridges, porosity) before invoking heavier Tier-2 multimodal SOP reasoning, with measured token accounting in `eval/RESULTS.md`.
+   Deterministic DSP (`T1-A`) handles periodic impacts and process windows in milliseconds at zero token cost; a cheap visual gate (`T1-B`: `gemini-3.5-flash-lite`, hedged with `gemma-4-26b-a4b-it`, the model family an on-prem edge box would run) screens optical defects (bridges, starved joints, porosity) before the heavier Tier-2 SOP reasoning. The token effect is measured in `eval/RESULTS.md`; it is only a saving when the gate clears most healthy parts.
 6. **Where's AlloyDB?**
    Not deployed in this demo. The hosted service honestly uses a SQLite demo store (which resets on container restart) plus real `gemini-embedding-2` cosine similarity over 18 SOPs; the production PostgreSQL + `pgvector(768)` schema lives in `infra/alloydb_schema.sql`.
 7. **Who will pay?**

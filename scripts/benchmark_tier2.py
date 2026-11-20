@@ -25,7 +25,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from google import genai
 from google.genai import types as genai_types
 
-from backend.config import PROJECT_ROOT
+from backend.config import PROJECT_ROOT, get_settings
 from backend.dsp.envelope import evaluate_t1a_signal_gate
 from backend.mock_rig.dataset import MANIFEST_PATH, ensure_dataset, load_sample_public
 from backend.schemas import MatchedSOPRecord, SensorTelemetry
@@ -58,7 +58,8 @@ def _pick_8_defect_samples() -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = (os.getenv("GEMINI_API_KEY", "") or get_settings().gemini_api_key).strip()
+    candidates = sys.argv[1].split(",") if len(sys.argv) > 1 else CANDIDATES
     assert api_key, "GEMINI_API_KEY required"
     client = genai.Client(api_key=api_key, http_options=genai_types.HttpOptions(timeout=15000))
     skill_loader = get_skill_loader()
@@ -84,7 +85,7 @@ def main() -> None:
     }
 
     summary: list[dict[str, Any]] = []
-    for model_id in CANDIDATES:
+    for model_id in candidates:
         ok_count = 0
         schema_valid = 0
         agree_count = 0
@@ -120,15 +121,24 @@ def main() -> None:
 
             t0 = time.perf_counter()
             try:
-                resp = client.models.generate_content(
-                    model=model_id,
-                    contents=parts,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=Tier2ModelOutput,
-                        temperature=0.15,
-                    ),
-                )
+                for attempt in range(2):  # one retry on free-tier 429/503, after waiting out the minute window
+                    t0 = time.perf_counter()
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_id,
+                            contents=parts,
+                            config=genai_types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=Tier2ModelOutput,
+                                temperature=0.15,
+                            ),
+                        )
+                        break
+                    except Exception as retry_exc:  # noqa: BLE001
+                        if attempt == 0 and ("429" in str(retry_exc) or "503" in str(retry_exc)):
+                            time.sleep(20.0)
+                            continue
+                        raise
                 ms = int((time.perf_counter() - t0) * 1000)
                 latencies.append(ms)
                 ok_count += 1

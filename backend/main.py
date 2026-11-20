@@ -3,7 +3,7 @@
 Serves on port 8080:
 - `GET /health` & `GET /api/metrics` — Truthful runtime routing & per-model counters
 - `GET /api/lines`, `POST /api/rig/draw`, `GET /api/rig/reveal/{sample_id}` — Mock Rig v2 blind mode
-- `POST /api/inspect` — T1-A DSP + T1-B Gemma 4 + Embedding Retrieval + Hedged T2 + T3 Overlay
+- `POST /api/inspect` — T1-A DSP + hedged T1-B visual gate + Embedding Retrieval + Hedged T2 + T3 Overlay
 - `POST /api/line-run` — Batch run with measured gated vs cloud-only token accounting
 - `POST /api/incidents/{id}/disposition` & `POST /api/work-orders` — Human disposition & work orders
 - `WS /api/live-copilot` & `POST /api/copilot/chat` — Tier-4 Floor Co-Pilot (`gemini-3.8-live`)
@@ -311,7 +311,7 @@ async def run_edge_to_cloud_inspection(
         wav_path=wav_path,
     )
 
-    # STAGE 1B: Visual/Context Gate (Gemma 4 26B-A4B -> gemini-3.1-flash-lite)
+    # STAGE 1B: Visual/Context Gate (staggered hedge over settings.t1b_candidates)
     t1b_vote, t1b_conf, t1b_obs, t1b_bbox, t1b_prov = await model_router.run_tier1_visual_gate(
         line=line,
         line_meta=line_meta,

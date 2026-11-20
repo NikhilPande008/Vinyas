@@ -251,6 +251,18 @@ SEED_SOPS: list[dict[str, Any]] = [
 ]
 
 
+
+def _as_separate_contents(texts: list[str]) -> list[Any]:
+    """Wrap each text as its own Content so the API returns one embedding per text."""
+    if genai_types is None:
+        return list(texts)
+    return [genai_types.Content(parts=[genai_types.Part(text=t)]) for t in texts]
+
+
+def _log_retrieval_event(event: str, detail: str) -> None:
+    print(json.dumps({"event": event, "stage": "RETRIEVAL", "detail": detail}), flush=True)
+
+
 class _WOExtractionSchema(BaseModel):
     part_code: str = Field(..., description="Spare part or component SKU if mentioned, else inferred standard SKU")
     shift_priority: str = Field(..., description="P1_IMMEDIATE, P2_CURRENT_SHIFT, or P3_PLANNED_PM")
@@ -424,7 +436,8 @@ class DemoStoreService:
                     asyncio.to_thread(
                         genai_client.models.embed_content,
                         model=model_id,
-                        contents=texts,
+                        # One Content per SOP: newer SDKs merge a plain list of strings into ONE embedding.
+                        contents=_as_separate_contents(texts),
                         config=genai_types.EmbedContentConfig(output_dimensionality=dim),
                     ),
                     timeout=12.0,
@@ -447,8 +460,10 @@ class DemoStoreService:
                         conn.commit()
                     finally:
                         conn.close()
-            except Exception:
-                pass
+                else:
+                    _log_retrieval_event("sop_embedding_count_mismatch", f"expected {len(missing)}, got {len(getattr(resp, 'embeddings', None) or [])}")
+            except Exception as exc:  # noqa: BLE001 - logged, keyword fallback is labelled
+                _log_retrieval_event("sop_embedding_error", f"{type(exc).__name__}: {str(exc)[:120]}")
 
         if len(self._sop_vectors) == len(SEED_SOPS):
             self.retrieval_mode = f"EMBEDDING_COSINE ({model_id})"
@@ -481,7 +496,7 @@ class DemoStoreService:
                     asyncio.to_thread(
                         genai_client.models.embed_content,
                         model=model_id,
-                        contents=[query_text],
+                        contents=_as_separate_contents([query_text]),
                         config=genai_types.EmbedContentConfig(output_dimensionality=dim),
                     ),
                     timeout=5.0,
@@ -516,8 +531,8 @@ class DemoStoreService:
                         note=f"Real cosine similarity over {len(SEED_SOPS)} SOPs",
                     )
                     return [item[1] for item in scored[:limit]], prov
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - logged, keyword fallback is labelled
+                _log_retrieval_event("query_embedding_error", f"{type(exc).__name__}: {str(exc)[:120]}")
 
         # Labelled keyword fallback (zero forced similarity!)
         scored_kw = []

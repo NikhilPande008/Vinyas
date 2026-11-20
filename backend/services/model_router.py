@@ -17,6 +17,7 @@ import io
 import json
 import sys
 import time
+from types import SimpleNamespace
 import uuid
 import wave
 from typing import Any, Literal, Optional
@@ -157,6 +158,15 @@ _T1B_LINE_GUIDE: dict[str, dict[str, str]] = {
         "not_defects": "regular concentric turning marks and drilled bolt holes",
     },
 }
+
+
+class _NonEmptyText:
+    """Parse result for free-text answers: rejects empty text so the hedge tries the next model."""
+
+    def __init__(self, text: str) -> None:
+        if not (text or "").strip():
+            raise ValueError("empty response text")
+        self.text = text
 
 
 def build_t1b_prompt(
@@ -892,13 +902,21 @@ class GoogleModelRouter:
                 self.metrics.record_attempt(self.settings.tier4_live_copilot_model, status, live_ms)
                 _log_attempt_json("T4_COPILOT", att)
 
-            # Text fallback
-            resp, used_model, fb_attempts = await self._call_genai_with_retry(
+            # Text fallback: staggered hedge across the text models (first answer wins)
+            text_models = [
+                m for m in (self.settings.tier4_fallback_model, self.settings.tier4_second_fallback_model) if m
+            ]
+            resp, used_model, fb_attempts = await self._run_staggered_hedge(
                 stage="T4_COPILOT",
-                model_candidates=[self.settings.tier4_fallback_model],
+                candidates=list(dict.fromkeys(text_models)),
                 contents=prompt,
-                timeout_sec=8.0,
+                config=None,
+                parse_fn=lambda text: _NonEmptyText(text),
+                stagger_sec=3.0,
+                total_timeout_sec=9.0,
             )
+            if resp is not None:
+                resp = SimpleNamespace(text=resp.text)
             attempts.extend(fb_attempts)
             if resp and used_model and getattr(resp, "text", None):
                 ans = resp.text.strip()

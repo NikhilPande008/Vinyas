@@ -43,6 +43,7 @@ Ground-truth labels live **exclusively** in `data/mock_rig/manifest.json`. The i
 
 ### Procedural Images (`backend/mock_rig/images.py`)
 - Resolution: `768 × 512` PNG, with directional illumination gradient and Gaussian sensor noise. **Zero text** is rendered on any frame.
-- **PCB:** 4-sided 64-lead QFP package with pads, copper traces, vias, and shape-only silkscreen. Bridges span 2–3 leads at a random side/pin; flux glare is a translucent patch off the leads.
+- **PCB:** 4-sided 64-lead QFP package with pads, copper traces, vias, and shape-only silkscreen. Bridges are an irregular, shiny grey solder mass joining 3 adjacent lead feet at the pads, on a random side/pin; flux glare is a translucent patch off the leads.
+  - *Change log (2026-11-20):* bridges were first drawn as a flat white rounded box across the middle of the leads, the same colour as the leads. It did not look like solder, and all three visual-gate models called it NOMINAL in a spot check. They were redrawn as solder at the lead feet (labels, seeds and telemetry unchanged; only the 4 bridge frames and their boxes changed) before `eval/visual_gate_benchmark.md` was run.
 - **WELD:** brushed steel plates with rippled weld bead; porosity clusters dark pits on the bead; cosmetic spatter places droplets beside the bead.
 - **CNC:** machined metallic bore/flange surface with turning marks. Because the rolling bearing sits inside the assembled spindle housing, the camera frame shows no bearing defect; CNC detection is vibration-led.

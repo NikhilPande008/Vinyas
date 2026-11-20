@@ -50,7 +50,10 @@ NOMINAL_TELEMETRY = {
     ),
     "CNC": SensorTelemetry(vibration_khz=0.09, vibration_rms_mms=0.9, temperature_c=41.0, line_speed_rpm=5400),
 }
-MAX_TRIES = 3
+MAX_TRIES = 2
+CONCURRENCY_PER_MODEL = 3
+CALL_TIMEOUT_SEC = 20.0
+RATE_LIMIT_BACKOFF_SEC = 30.0
 
 
 def _pct(vals: list[int], q: float) -> int | None:
@@ -71,34 +74,42 @@ async def _ask(client, model: str, image: bytes, prompt: str) -> dict:
                     contents=[genai_types.Part.from_bytes(data=image, mime_type="image/png"), prompt],
                     config=cfg,
                 ),
-                timeout=30.0,
+                timeout=CALL_TIMEOUT_SEC,
             )
             ms = int((time.perf_counter() - t0) * 1000)
             vote, conf, obs, _ = parse_t1b_response(resp.text or "")
             return {"vote": vote, "confidence": conf, "obs": obs[:1], "latency_ms": ms, "tries": attempt}
         except Exception as exc:  # noqa: BLE001 - recorded, then retried
             last_err = f"{type(exc).__name__}: {str(exc)[:60]}"
-            await asyncio.sleep(2.0 * attempt)
+            # 429 on the free tier is per-minute throttling: wait out the window before retrying
+            await asyncio.sleep(RATE_LIMIT_BACKOFF_SEC if "429" in last_err else 2.0 * attempt)
     return {"vote": None, "error": last_err, "tries": MAX_TRIES}
 
 
-async def _run_model(client, model: str, samples: list[dict]) -> list[dict]:
-    rows = []
-    for s in samples:
-        line = s["line"]
-        t1a = evaluate_t1a_signal_gate(line, NOMINAL_TELEMETRY[line], None)
-        prompt = build_t1b_prompt(line, LINE_DEFINITIONS[line], t1a.features, [])
-        image = (SAMPLES_DIR / s["sample_id"] / "frame.png").read_bytes()
-        res = await _ask(client, model, image, prompt)
-        res.update(
-            sample_id=s["sample_id"],
-            line=line,
-            ground_truth=s["defect_type"],
-            visible_defect=s["defect_type"] in VISIBLE_DEFECTS,
-        )
-        rows.append(res)
-        print(model, s["sample_id"], s["defect_type"], res.get("vote") or res.get("error"), flush=True)
-    return rows
+async def _run_model(client, model: str, samples: list[dict], concurrency: int = CONCURRENCY_PER_MODEL) -> list[dict]:
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(s: dict) -> dict:
+        async with sem:
+            return await _run_frame(client, model, s)
+
+    return list(await asyncio.gather(*(_one(s) for s in samples)))
+
+
+async def _run_frame(client, model: str, s: dict) -> dict:
+    line = s["line"]
+    t1a = evaluate_t1a_signal_gate(line, NOMINAL_TELEMETRY[line], None)
+    prompt = build_t1b_prompt(line, LINE_DEFINITIONS[line], t1a.features, [])
+    image = (SAMPLES_DIR / s["sample_id"] / "frame.png").read_bytes()
+    res = await _ask(client, model, image, prompt)
+    res.update(
+        sample_id=s["sample_id"],
+        line=line,
+        ground_truth=s["defect_type"],
+        visible_defect=s["defect_type"] in VISIBLE_DEFECTS,
+    )
+    print(model, s["sample_id"], s["defect_type"], res.get("vote") or res.get("error"), flush=True)
+    return res
 
 
 def _summarise(model: str, rows: list[dict]) -> dict:
@@ -136,15 +147,32 @@ def _choose(summaries: list[dict]) -> dict | None:
     return sorted(eligible, key=lambda s: (-s["recall_pct"], s["p50_ms"] or 10**9))[0]
 
 
+async def _retry_failed(client, models: list[str], samples: list[dict]) -> list[list[dict]]:
+    """Re-run only frames that got no vote in the previous run (e.g. throttled), then merge."""
+    prev = json.loads((PROJECT_ROOT / "eval" / "visual_gate_benchmark.json").read_text(encoding="utf-8"))
+    by_id = {s["sample_id"]: s for s in samples}
+    async def _one_model(m: str) -> list[dict]:
+        rows = prev["rows"][m]
+        todo = [by_id[r["sample_id"]] for r in rows if not r.get("vote")]
+        redo = {r["sample_id"]: r for r in await _run_model(client, m, todo, concurrency=1)}
+        return [redo.get(r["sample_id"], r) if not r.get("vote") else r for r in rows]
+
+    return list(await asyncio.gather(*(_one_model(m) for m in models)))
+
+
 async def main() -> None:
     models = sys.argv[1].split(",")
+    retry_failed = "--retry-failed" in sys.argv
     ensure_dataset()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     samples = [m for m in manifest if m["line"] in ("PCB", "WELD")]
     samples += [m for m in manifest if m["line"] == "CNC"][:6]
     client = genai.Client(api_key=get_settings().gemini_api_key)
 
-    results = await asyncio.gather(*(_run_model(client, m, samples) for m in models))
+    if retry_failed:
+        results = await _retry_failed(client, models, samples)
+    else:
+        results = await asyncio.gather(*(_run_model(client, m, samples) for m in models))
     summaries = [_summarise(m, rows) for m, rows in zip(models, results)]
     chosen = _choose(summaries)
 
@@ -166,10 +194,15 @@ async def main() -> None:
         "",
         f"Upload mode: each frame is sent with nominal telemetry and no flags, so the vote reflects the image alone. "
         f"{len(samples)} frames: 20 PCB, 20 WELD, 6 CNC (CNC frames never show a defect because the bearing is inside the spindle). "
-        f"Prompt: `backend/services/model_router.py:build_t1b_prompt`. Up to {MAX_TRIES} tries per frame on API errors.",
+        f"Prompt: `backend/services/model_router.py:build_t1b_prompt`. Up to {MAX_TRIES} tries per frame on API errors, {CALL_TIMEOUT_SEC:.0f} s per try.",
         "",
         f"- **Timestamp (UTC):** {out['timestamp_utc']}",
         f"- **Decision rule (fixed before the run):** {out['decision_rule']}",
+        *(
+            ["- **Retry pass:** frames with no vote in the first pass (free-tier 429/503) were re-run one at a time per model and merged."]
+            if retry_failed
+            else []
+        ),
         f"- **Chosen primary:** `{out['chosen']}`" if out["chosen"] else "- **Chosen primary:** none met the rule",
         "",
         "| Model | Answered | Visible defects caught (recall) | False alarms on no-defect frames | p50 ms | p95 ms | Mean tries |",
