@@ -140,7 +140,16 @@ class GoogleModelRouter:
         self._client: Any = client
         if self._client is None and genai is not None and self.settings.gemini_api_key:
             try:
-                self._client = genai.Client(api_key=self.settings.gemini_api_key)
+                http_opts = (
+                    genai_types.HttpOptions(timeout=12000)
+                    if genai_types is not None and hasattr(genai_types, "HttpOptions")
+                    else None
+                )
+                self._client = (
+                    genai.Client(api_key=self.settings.gemini_api_key, http_options=http_opts)
+                    if http_opts is not None
+                    else genai.Client(api_key=self.settings.gemini_api_key)
+                )
             except Exception as exc:
                 print(
                     json.dumps({"event": "genai_client_init_error", "error": type(exc).__name__}),
