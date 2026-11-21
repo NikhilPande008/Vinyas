@@ -113,7 +113,8 @@ def _render_envelope_spectrum_png(
     for hz_tick in (0, 500, 1000, 1500, 2000):
         x = int(pad_l + plot_w * (hz_tick / max_freq))
         draw.line([(x, pad_t), (x, h - pad_b)], fill=(30, 41, 59), width=1)
-        draw.text((x - 14, h - pad_b + 8), f"{hz_tick}Hz", fill=(148, 163, 184))
+        label_x = min(x - 14, w - 46)
+        draw.text((label_x, h - pad_b + 8), f"{hz_tick}Hz", fill=(148, 163, 184))
 
     # Dashed reference markers at computed BPFO and 2x BPFO (geometry-derived, not a verdict)
     for mult, col in ((1, (251, 191, 36)), (2, (245, 158, 11))):
