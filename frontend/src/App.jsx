@@ -485,7 +485,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Header Bar */}
-      <header className="border-b border-slate-800 bg-slate-900/95 px-4 py-3 sticky top-0 z-30">
+      <header className="border-b border-slate-800 bg-slate-900/95 px-4 py-3 md:sticky md:top-0 z-30">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-sky-500/20 border border-sky-400/40 flex items-center justify-center">
@@ -733,7 +733,13 @@ export default function App() {
                 <div className="space-y-1">
                   <div className="text-2xl font-extrabold tracking-tight">{verdictStyle.label}</div>
                   <div className="text-sm opacity-90">
-                    {diag ? diag.root_cause_analysis : t1?.escalation_reason}
+                    {diag
+                      ? diag.root_cause_analysis
+                      : t1?.pass_status === 'HEALTHY'
+                      ? t1?.t1b_vote === 'SKIPPED'
+                        ? t.healthyCncSummary
+                        : t.healthySummary
+                      : t1?.escalation_reason}
                   </div>
                   <div className="flex flex-wrap gap-2 pt-1">
                     <span className="px-2.5 py-1 rounded-full bg-slate-950/60 text-xs font-semibold">
@@ -1290,9 +1296,10 @@ export default function App() {
         {inspection && (
           <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <FileCheck2 className="w-5 h-5 text-emerald-400" />
-                {t.dispositionTitle} — <span className="font-mono text-sky-300">{inspection.incident_id}</span>
+              <h2 className="text-base font-bold text-white flex flex-wrap items-center gap-2">
+                <FileCheck2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <span>{disposition ? t.dispositionRecordedTitle : t.dispositionTitle}</span>
+                <span className="font-mono text-sky-300 whitespace-nowrap">{inspection.incident_id}</span>
               </h2>
               <span className="text-xs text-slate-300">
                 {t.systemRecommends}:{' '}
@@ -1422,8 +1429,13 @@ export default function App() {
 
       {/* Metrics Modal */}
       {metricsModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-2xl w-full p-5 space-y-4 max-h-[85vh] overflow-y-auto">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Live Model Health and Routing Config"
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+        >
+          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-2xl w-full p-4 space-y-3 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <Activity className="w-5 h-5 text-sky-400" />
