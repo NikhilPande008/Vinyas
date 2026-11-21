@@ -476,11 +476,28 @@ class DemoStoreService:
         genai_client: Any = None,
         limit: int = 3,
         input_simulated: bool = True,
+        line: Optional[str] = None,
     ) -> tuple[list[MatchedSOPRecord], StageProvenance]:
-        """Rank all 18 SOPs by real `gemini-embedding-2` cosine similarity (or labelled keyword fallback)."""
+        """Rank SOPs by real `gemini-embedding-2` cosine similarity (or labelled keyword fallback).
+
+        When `line` (`PCB`, `CNC`, `WELD`) is provided, restricts candidates to that line's
+        `machine_type` so cross-line distractors cannot outrank same-line SOPs.
+        """
         t0 = time.perf_counter()
         model_id = self.settings.embedding_model
         dim = self.settings.embedding_dim
+
+        line_to_machine = {
+            "PCB": "SMT_REFLOW_PCB",
+            "CNC": "CNC_SPINDLE",
+            "WELD": "MIG_CHASSIS_WELD",
+        }
+        target_machine = line_to_machine.get((line or "").upper())
+        candidate_sops = (
+            [s for s in SEED_SOPS if s["machine_type"] == target_machine]
+            if target_machine
+            else list(SEED_SOPS)
+        )
 
         # Ensure embeddings are populated if client is available
         if len(self._sop_vectors) < len(SEED_SOPS) and genai_client is not None:
@@ -504,7 +521,7 @@ class DemoStoreService:
                 if resp and getattr(resp, "embeddings", None):
                     q_vec = [float(v) for v in resp.embeddings[0].values]
                     scored = []
-                    for sop in SEED_SOPS:
+                    for sop in candidate_sops:
                         sim = round(_cosine(q_vec, self._sop_vectors[sop["id"]]), 3)
                         scored.append(
                             (
@@ -522,13 +539,18 @@ class DemoStoreService:
                         )
                     scored.sort(key=lambda item: item[0], reverse=True)
                     elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                    scope_note = (
+                        f"Real cosine similarity over {len(candidate_sops)} {line.upper()} SOPs (from {len(SEED_SOPS)} total)"
+                        if target_machine and line
+                        else f"Real cosine similarity over {len(SEED_SOPS)} SOPs"
+                    )
                     prov = StageProvenance(
                         stage="RETRIEVAL",
                         producer="MODEL",
                         model_id=model_id,
                         latency_ms=elapsed_ms,
                         input_simulated=input_simulated,
-                        note=f"Real cosine similarity over {len(SEED_SOPS)} SOPs",
+                        note=scope_note,
                     )
                     return [item[1] for item in scored[:limit]], prov
             except Exception as exc:  # noqa: BLE001 - logged, keyword fallback is labelled
@@ -536,7 +558,7 @@ class DemoStoreService:
 
         # Labelled keyword fallback (zero forced similarity!)
         scored_kw = []
-        for sop in SEED_SOPS:
+        for sop in candidate_sops:
             sim = _keyword_score(query_text, sop)
             scored_kw.append(
                 (

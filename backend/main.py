@@ -59,10 +59,26 @@ from backend.services.rate_limiter import TokenBucketRateLimiter
 from backend.services.skill_loader import get_skill_loader
 
 
+_settings = get_settings()
 demo_store = DemoStoreService()
 model_router = GoogleModelRouter()
 skill_loader = get_skill_loader()
-rate_limiter = TokenBucketRateLimiter(capacity=30, window_seconds=600)
+rate_limiter = TokenBucketRateLimiter(
+    capacity=_settings.rate_limit_capacity,
+    window_seconds=_settings.rate_limit_window_seconds,
+)
+
+# Human-readable semantic expansion of Tier-1A DSP flags for sharper SOP embedding retrieval
+_FLAG_SEMANTIC_HINTS: dict[str, str] = {
+    "BEARING_PERIODIC_IMPACT": "CNC spindle angular-contact bearing outer-race BPFO periodic impact fault",
+    "VIBRATION_ZONE_C_OR_D": "CNC spindle toolholder 1x shaft harmonic imbalance ISO 20816 zone C D",
+    "TRANSIENT_IMPACT": "single non-periodic transient impact wrench strike",
+    "REFLOW_RAMP_OUT_OF_WINDOW": "SMT PCB QFP solder bridge stencil paste slump reflow preheat ramp",
+    "REFLOW_PEAK_OUT_OF_WINDOW": "SMT PCB QFP insufficient solder fillet cold joint reflow peak temperature",
+    "REFLOW_TAL_OUT_OF_WINDOW": "SMT PCB QFP insufficient solder cold joint time above liquidus",
+    "SHIELDING_GAS_LOW": "robotic MIG weld seam porosity low shielding gas flow nozzle",
+    "ARC_VOLTAGE_OUT_OF_WINDOW": "MIG contact tip wear arc voltage drift",
+}
 
 # Tracks sample_ids inspected in this server session so /api/rig/reveal only unlocks post-inspection
 _inspected_samples: set[str] = set()
@@ -425,10 +441,12 @@ async def run_edge_to_cloud_inspection(
             telemetry=telemetry,
         )
 
-    # STAGE 2: Progressive Skill Activation + Real Embedding SOP Retrieval
+    # STAGE 2: Progressive Skill Activation + Line-Scoped Embedding SOP Retrieval
     active_skill = skill_loader.activate_skill_for_line(line, t1a_result.all_flags)
+    flag_phrases = [_FLAG_SEMANTIC_HINTS.get(f, f) for f in t1a_result.all_flags]
     retrieval_query = (
-        f"{line} {line_meta['line_name']} flags: {' '.join(t1a_result.all_flags)} "
+        f"{line} {line_meta['line_name']} "
+        f"signals: {'; '.join(flag_phrases) if flag_phrases else 'none'} "
         f"observations: {' '.join(t1b_obs)}"
     )
     matched_sops, ret_prov = await demo_store.search_sops(
@@ -436,6 +454,7 @@ async def run_edge_to_cloud_inspection(
         genai_client=model_router._client,
         limit=3,
         input_simulated=input_simulated,
+        line=line,
     )
     retrieval_ms = ret_prov.latency_ms
     provenance_list.append(ret_prov)

@@ -1,7 +1,7 @@
 """Vinyas — Truthful Multi-Model Router (`backend/services/model_router.py`).
 
 Implements:
-- T1-B visual/context gate: `gemma-4-26b-a4b-it` -> `gemini-3.1-flash-lite` (fail-safe)
+- T1-B visual/context gate (staggered hedge): `gemini-3.5-flash-lite` -> `gemma-4-26b-a4b-it` -> `gemini-3.1-flash-lite` (fail-safe)
 - T2 multimodal root-cause diagnosis: hedged request across primary & runner-up
   (chosen by `eval/model_selection.md`), strict Pydantic schema (no money fields),
   deterministic SOP guard (`sop_guard.py`), deterministic economics (`economics.py`)
@@ -584,6 +584,8 @@ class GoogleModelRouter:
             "Instructions:\n"
             "- Classify defect_type strictly from: SOLDER_BRIDGE, INSUFFICIENT_SOLDER, OUTER_RACE_FAULT, "
             "IMBALANCE, POROSITY_GAS_LOSS, NO_DEFECT_FOUND, OTHER.\n"
+            "- On PCB, distinguish carefully between SOLDER_BRIDGE (bright metallic solder blob joining two or more adjacent leads; often paired with high reflow ramp >3.0 °C/s -> SOP-PCB-01) "
+            "and INSUFFICIENT_SOLDER (dark, brown, bare, or starved pads missing bright solder fillet without any bridge between leads; often paired with low reflow peak <235 °C or low TAL <45 s -> SOP-PCB-02).\n"
             "- On CNC, the bearing is internal; use the DSP features and envelope spectrum PNG (not the part image) to diagnose OUTER_RACE_FAULT or IMBALANCE, and set bbox to null.\n"
             "- On PCB or WELD, if a visible defect exists, provide bbox as [ymin, xmin, ymax, xmax] integers 0..1000. If NO_DEFECT_FOUND, set bbox to null and recommended_disposition to RELEASE.\n"
             "- Only cite numeric parameters (torques, temperatures, ramp rates, gas flow, tolerances) that appear in the retrieved SOPs or skill references.\n"

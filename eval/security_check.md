@@ -9,4 +9,4 @@
 | SPA path traversal (`GET /..%2f..%2frequirements.txt`) | HTTP `404` — Blocked (`True`), zero file contents leaked |
 | Secret Manager (`gemini-api-key:latest`) | Bound via `--set-secrets=GEMINI_API_KEY=gemini-api-key:latest` (removed from `--set-env-vars`) |
 | CORS policy | Explicit local dev origins only, `allow_credentials=False` |
-| Rate limiter | Active per-IP token bucket (`30 req / 10 min`, HTTP `429`) |
+| Rate limiter | Active per-IP token bucket (`120 req / 10 min` default, env-configurable via `RATE_LIMIT_CAPACITY`, HTTP `429`) |

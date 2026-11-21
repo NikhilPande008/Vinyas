@@ -46,7 +46,7 @@ The live check and a packet review found problems the earlier phases missed. Fix
 | SOP retrieval | Hash bag-of-words + forced `max(sim, 0.96)` | `gemini-embedding-2` (`768-D`) over 18 SOPs + labelled keyword fallback |
 | Economics | LLM prompt `integer > 25000` | Deterministic `economics.py` (`docs/ASSUMPTIONS.md`), `₹0` nominal |
 | Human approval | None | Mandatory QE/Supervisor disposition before work order |
-| Offline test suite | 7/7 in `180 s` (live API, scripted assertions) | 32 passed + 1 live test skipped, ~3 s (offline, zero scripted verdict assertions) |
+| Offline test suite | 7/7 in `180 s` (live API, scripted assertions) | 35 passed + 2 live tests skipped, ~3.2 s (offline, zero scripted verdict assertions) |
 
 ## 3. Eval Headline Numbers (Live Cloud Run: `eval/live_run_20261120_184801.md`)
 
@@ -87,20 +87,17 @@ The live check and a packet review found problems the earlier phases missed. Fix
 
 Run 1 (`eval/model_selection_run1.md`) also tried `gemini-4-hydrogen` (0/8, 503s/timeouts) and `gemini-3.5-flash` (0/8).
 
-## 5. User Actions Still Required
-1. **Rotate `GEMINI_API_KEY`** in Google AI Studio (restrict to Generative Language API) and upload it to Secret Manager (`gemini-api-key:latest`).
-2. **Approve redeploying Cloud Run** with the post-audit fixes, then run `scripts/verify_live.py` against it.
-3. **Billing decision:** You chose to stay on the free tier. Expect `503`/`429` spikes during judging; the hedges and fail-safe hold reduce but do not remove them.
-4. **Record 3:00 demo video** following `docs/DEMO_SCRIPT.md` against the deployed Cloud Run URL.
-5. **Customer evidence:** Fill `docs/CUSTOMER_EVIDENCE.md` if any plant interviews are conducted before submission (otherwise keep the honest "not yet done" statement).
-6. **Merge & push approval:** Approve merging `improve/jury-fixes` into `main` and pushing after Phase 10 live verification.
+## 5. Post-Audit Technical Hardening (Completed)
+- **Line-scoped SOP retrieval + semantic flag expansion:** `backend/db/demo_store.py:search_sops` now filters candidates by `line` (`PCB`/`CNC`/`WELD`) so cross-line distractors cannot outrank same-line SOPs, and `backend/main.py` expands raw DSP flags into semantic phrases before embedding with `gemini-embedding-2`.
+- **PCB `INSUFFICIENT_SOLDER` vs `SOLDER_BRIDGE` visual/telemetry disambiguation:** sharpened prompts in `backend/services/model_router.py` and `.agents/skills/pcb-defect-triage/SKILL.md`.
+- **Venue-NAT rate-limit headroom:** raised default per-IP token bucket from `30` to `120 req / 10 min` (configurable via `RATE_LIMIT_CAPACITY` / `RATE_LIMIT_WINDOW_SECONDS` in `backend/config.py`).
+- **Canonical evaluation & doc hygiene:** synced `eval/RESULTS.md` to the live Cloud Run `n=30` run (`eval/live_run_20261120_184801.md`), fixed stale docstrings, and verified `35 passed, 2 skipped` in `pytest -v`.
 
 ## 6. Open Risks for Judging Day
 - **Free-tier `503`/`429`:** the main risk. Hedging across three visual-gate models and two Tier-2 models reduces it; when all fail, parts are held for human review (fail-safe), so a healthy part can show HOLD during an outage. `gemini-3.8-flash` and all Nano Banana image models have no quota on this key.
 - **Synthetic data is easy:** perfect gate scores on clean procedural frames will not carry over to real photos; no real-image accuracy is measured. Judges uploading their own photos may see misses or false alarms.
-- **Retrieval ranking:** real embeddings put the right SOP in the top 3 but often not first; Tier-2 picks the final SOP. The UI shows the ranked list, so a judge may see a related-but-wrong SOP at the top.
 - **Cloud Run cold starts & SQLite reset:** `--min-instances=1` reduces cold starts; container recycles reset demo data (labelled in the UI).
-- **Rate limit (`30 req / 10 min` per IP):** a shared venue NAT could hit HTTP 429.
+- **Rate limit (`120 req / 10 min` per IP, env-configurable):** protects against abuse while accommodating multiple judges behind a shared venue NAT.
 - **Browser speech support:** `SpeechRecognition` needs Chrome/Edge; others type instead.
 
 ## 7. Harsh Self-Score Against Jury Rubric

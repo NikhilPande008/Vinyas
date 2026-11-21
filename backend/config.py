@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         validation_alias="SQLITE_DB_PATH",
     )
 
+    # Per-IP API rate limit (configurable for shared venue NAT during live judging)
+    rate_limit_capacity: int = Field(default=120, validation_alias="RATE_LIMIT_CAPACITY")
+    rate_limit_window_seconds: int = Field(default=600, validation_alias="RATE_LIMIT_WINDOW_SECONDS")
+
     # Verified Google AI model routing configuration (see eval/model_selection.md)
     # Tier-1B hedge order chosen by eval/visual_gate_benchmark.md (decision rule fixed before the run)
     tier1_visual_gate_model: str = "gemini-3.5-flash-lite"

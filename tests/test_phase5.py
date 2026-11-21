@@ -30,6 +30,19 @@ def test_18_sops_and_distinct_queries_return_distinct_top1():
     # Verify no forced 0.96 override
     assert all(s.similarity_score != 0.96 for s in sops_pcb + sops_cnc + sops_weld)
 
+    # Verify line-scoped retrieval never returns cross-line distractors
+    sops_cnc_scoped, _ = asyncio.run(
+        store.search_sops("solder bridge porosity", genai_client=None, limit=3, line="CNC")
+    )
+    assert len(sops_cnc_scoped) == 3
+    assert all(s.machine_type == "CNC_SPINDLE" for s in sops_cnc_scoped)
+
+    sops_pcb_scoped, _ = asyncio.run(
+        store.search_sops("insufficient solder cold joint starved pads", genai_client=None, limit=3, line="PCB")
+    )
+    assert all(s.machine_type == "SMT_REFLOW_PCB" for s in sops_pcb_scoped)
+    assert sops_pcb_scoped[0].id == "SOP-PCB-02"
+
 
 def test_disposition_required_before_work_order_and_multilingual_extract():
     import uuid
