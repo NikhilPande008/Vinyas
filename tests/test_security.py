@@ -61,7 +61,9 @@ def test_cors_no_wildcard_credentials():
 
 def test_rate_limiter_returns_429_after_limit():
     # Test the token bucket directly and through an endpoint to keep the test fast and offline.
-    for _ in range(30):
+    cap = int(rate_limiter.capacity)
+    assert cap >= 30
+    for _ in range(cap):
         allowed, _ = rate_limiter.consume("203.0.113.10", cost=1)
         assert allowed is True
     allowed, retry_after = rate_limiter.consume("203.0.113.10", cost=1)
